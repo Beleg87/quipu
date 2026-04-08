@@ -41,7 +41,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "PLACEHOLDER_TAURI_UPDATE_PUBKEY",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJBNDU1RkY1RTBFNTJEMEQKUldRTkxlWGc5VjlGdXNRMjdybmJ2aDBtQnY4U041MmFqaUN5dFJuQ3gwTTJuNGtlS1Bsb1RjUWgK",
       "endpoints": [
         "https://github.com/quipu-app/quipu/releases/latest/download/latest.json"
       ]
