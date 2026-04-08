@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-nightly.[0-9]+"
+
+jobs:
+  build-client:
+    name: Build & Bundle (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "client/src-tauri -> target"
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+        working-directory: client
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: client
+          tagName: ${{ github.ref_name }}
+          releaseName: "Quipu ${{ github.ref_name }}"
+          releaseBody: "See CHANGELOG.md for details."
+          releaseDraft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          args: ${{ matrix.args }}
+
+  build-signaling:
+    name: Build Signaling Server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: Cross-compile
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          cd signaling
+          mkdir -p ../dist
+          GOOS=linux   GOARCH=amd64 go build -o ../dist/quipu-signaling-linux-amd64      ./cmd/signaling
+          GOOS=windows GOARCH=amd64 go build -o ../dist/quipu-signaling-windows-amd64.exe ./cmd/signaling
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/quipu-signaling-*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

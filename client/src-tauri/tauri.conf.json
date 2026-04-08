@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Quipu",
+  "version": "0.1.0",
+  "identifier": "app.quipu",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand":   "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "bundle": {
+    "active":  true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "app": {
+    "windows": [
+      {
+        "label":           "main",
+        "title":           "Quipu",
+        "width":           1024,
+        "height":          720,
+        "minWidth":        760,
+        "minHeight":       520,
+        "decorations":     false,
+        "transparent":     false,
+        "resizable":       true,
+        "fullscreen":      false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "PLACEHOLDER_TAURI_UPDATE_PUBKEY",
+      "endpoints": [
+        "https://github.com/quipu-app/quipu/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

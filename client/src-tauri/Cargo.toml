@@ -1,0 +1,36 @@
+[package]
+name    = "quipu"
+version = "0.1.0"
+edition = "2021"
+rust-edition = "2021"
+
+[lib]
+name        = "quipu_lib"
+crate-type  = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "quipu"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri             = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-updater     = "2"
+tauri-plugin-notification = "2"
+serde             = { version = "1", features = ["derive"] }
+serde_json        = "1"
+tokio             = { version = "1", features = ["full"] }
+
+# Noise protocol encryption
+snow = "0.9"
+# WebRTC (media pipeline wired in Phase 2)
+hex = "0.4"
+# webrtc = "0.11"
+
+[profile.release]
+opt-level   = 3
+lto         = true
+codegen-units = 1
+strip       = true

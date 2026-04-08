@@ -1,0 +1,27 @@
+# Rust / Tauri
+target/
+client/dist/
+client/src-tauri/gen/
+
+# Node
+node_modules/
+client/node_modules/
+pnpm-lock.yaml
+
+# Go
+signaling/quipu-signaling
+
+# Build artefacts
+dist/
+*.exe
+*.msi
+*.dmg
+*.AppImage
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.pem
+*.key
