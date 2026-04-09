@@ -60,36 +60,3 @@ jobs:
           includeUpdaterJson:    true
           updaterJsonPreferNsis: true
           args:                  ${{ matrix.args }}
-
-  build-signaling:
-    name: Build Signaling Server
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-
-      - name: Cross-compile
-        working-directory: signaling
-        env:
-          CGO_ENABLED: "0"
-          GONOSUMCHECK: "*"
-          GOFLAGS: "-mod=mod"
-          GONOSUMDB: "*"
-          GOPATH: "/home/runner/go"
-        run: |
-          go mod tidy
-          mkdir -p ../dist
-          GOOS=linux   GOARCH=amd64 go build -mod=mod -o ../dist/quipu-signaling-linux-amd64       ./cmd/signaling
-          GOOS=windows GOARCH=amd64 go build -mod=mod -o ../dist/quipu-signaling-windows-amd64.exe  ./cmd/signaling
-
-      - name: Upload to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/quipu-signaling-*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
