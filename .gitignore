@@ -6,7 +6,6 @@ client/src-tauri/gen/
 # Node
 node_modules/
 client/node_modules/
-pnpm-lock.yaml
 
 # Go
 signaling/quipu-signaling
