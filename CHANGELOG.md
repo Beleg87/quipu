@@ -1,6 +1,6 @@
-## [0.1.4] - 2026-04-09
+## [0.1.5] - 2026-04-09
 
-Discord-style voice channels, chat history, settings overhaul
+Fix voice peer list, fix nickname display in voice channels
 
 # Changelog
 

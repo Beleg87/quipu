@@ -45,6 +45,9 @@ const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 let localStream: MediaStream | null = null;
 let chatNextId = 1;
 
+// Separate set tracking fingerprints of peers in the current voice channel
+const voicePeers: Set<string> = new Set();
+
 // ── Persistence helpers ───────────────────────────────────────────────────────
 
 // Each text channel's messages are stored locally, keyed by server+channel
@@ -251,13 +254,19 @@ function renderSidebar() {
     // Also show peers in active voice channel
     if (state.activeVoice) {
       const activeEl = vList.querySelector(`[data-ch="${state.activeVoice}"]`);
-      if (activeEl && state.peers.size > 0) {
+      if (activeEl) {
         const peersDiv = document.createElement("div");
         peersDiv.className = "voice-peers";
-        state.peers.forEach(p => {
+        // Show yourself first
+        const selfEl = document.createElement("div");
+        selfEl.className = "voice-peer-item";
+        selfEl.innerHTML = `<span class="dot connected"></span><span>${escapeHtml(state.myNickname || state.fingerprint.slice(0, 8))}</span>`;
+        peersDiv.appendChild(selfEl);
+        // Show voice peers only
+        voicePeers.forEach(fp => {
           const pEl = document.createElement("div");
           pEl.className = "voice-peer-item";
-          pEl.innerHTML = `<span class="dot connected"></span><span>${escapeHtml(displayName(p.fp))}</span>`;
+          pEl.innerHTML = `<span class="dot connected"></span><span>${escapeHtml(displayName(fp))}</span>`;
           peersDiv.appendChild(pEl);
         });
         activeEl.after(peersDiv);
@@ -650,7 +659,13 @@ function displayName(fp: string): string {
 
 function broadcastNickname() {
   if (!state.connected || !state.myNickname) return;
-  invoke("send_chat", { text: `__nick:${state.myNickname}`, fingerprint: state.fingerprint, room: "quipu-main" }).catch(() => {});
+  const nick = `__nick:${state.myNickname}`;
+  // Broadcast on the main signaling room
+  invoke("send_chat", { text: nick, fingerprint: state.fingerprint, room: "quipu-main" }).catch(() => {});
+  // Also broadcast on active voice channel room so voice peers get the nickname
+  if (state.activeVoice) {
+    invoke("send_chat", { text: nick, fingerprint: state.fingerprint, room: `voice-${state.activeVoice}` }).catch(() => {});
+  }
 }
 
 // ── Peer lifecycle ────────────────────────────────────────────────────────────
@@ -658,6 +673,8 @@ function broadcastNickname() {
 function onPeerJoined(fp: string) {
   if (!fp || fp === state.fingerprint) return;
   if (!state.peers.has(fp)) state.peers.set(fp, { fp, pc: null as any, muted: false });
+  // If we're in a voice channel, this join came from the voice room
+  if (state.activeVoice) voicePeers.add(fp);
   renderSidebar();
   const st = document.getElementById("text-status");
   if (st) st.textContent = `${state.peers.size} peer(s) connected`;
@@ -668,6 +685,7 @@ function onPeerJoined(fp: string) {
 function onPeerLeft(fp: string) {
   const peer = state.peers.get(fp);
   if (peer) { peer.pc?.close(); state.peers.delete(fp); }
+  voicePeers.delete(fp);
   document.getElementById(`audio-${fp}`)?.remove();
   renderSidebar();
   const st = document.getElementById("text-status");
@@ -726,12 +744,15 @@ async function toggleVoiceChannel(ch: string) {
   // Connect to voice channel room on signaling server
   await invoke("connect_signaling", { url: state.serverUrl, room: `voice-${ch}`, fingerprint: state.fingerprint })
     .catch(() => {});
+  // Announce our nickname to voice peers immediately
+  broadcastNickname();
   state.peers.forEach((_, fp) => createOrGetPC(fp, true));
   renderSidebar();
 }
 
 function leaveVoice() {
   state.activeVoice = null;
+  voicePeers.clear();
   localStream?.getTracks().forEach(t => t.stop());
   localStream = null;
   state.peers.forEach(p => { p.pc?.close(); state.peers.set(p.fp, { ...p, pc: null as any }); });
