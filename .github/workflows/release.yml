@@ -72,12 +72,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
+          cache: false
 
       - name: Cross-compile
         working-directory: signaling
         env:
           CGO_ENABLED: "0"
+          GOFLAGS: "-mod=mod"
         run: |
+          go mod tidy
           mkdir -p ../dist
           go build -o ../dist/quipu-signaling-linux-amd64       ./cmd/signaling
           GOOS=windows GOARCH=amd64 go build -o ../dist/quipu-signaling-windows-amd64.exe ./cmd/signaling

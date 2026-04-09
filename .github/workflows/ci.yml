@@ -20,9 +20,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
-          cache: true
-          cache-dependency-path: signaling/go.sum
-      - run: go mod download
+          cache: false
+      - run: go mod tidy
       - run: go build ./...
       - run: go vet ./...
 
