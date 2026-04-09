@@ -46,6 +46,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath:           client
+          tauriScript:           pnpm tauri
           tagName:               ${{ github.ref_name }}
           releaseName:           "Quipu ${{ github.ref_name }}"
           releaseBody:           |
