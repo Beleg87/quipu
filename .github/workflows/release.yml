@@ -28,8 +28,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          # No cache here — pnpm-lock.yaml not committed yet.
-          # pnpm install is fast enough without caching for now.
 
       - uses: dtolnay/rust-toolchain@stable
 
