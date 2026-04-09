@@ -28,8 +28,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: client/pnpm-lock.yaml
+          # No cache here — pnpm-lock.yaml not committed yet.
+          # pnpm install is fast enough without caching for now.
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -38,7 +38,7 @@ jobs:
           workspaces: "client/src-tauri -> target"
 
       - name: Install frontend deps
-        run: pnpm install --frozen-lockfile
+        run: pnpm install
         working-directory: client
 
       - name: Build Tauri app + updater artifacts
@@ -67,7 +67,6 @@ jobs:
   build-signaling:
     name: Build Signaling Server
     runs-on: ubuntu-latest
-    # Run independently — don't let this block or cancel the client build
     permissions:
       contents: write
     steps:

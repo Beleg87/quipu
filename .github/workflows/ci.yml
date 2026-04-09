@@ -59,7 +59,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: client/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
+          # No cache until pnpm-lock.yaml is committed
+      - run: pnpm install
       - run: pnpm build
