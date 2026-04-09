@@ -2,7 +2,6 @@ mod crypto;
 mod signaling;
 mod voice;
 
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::State;
 use tauri_plugin_store::StoreExt;
@@ -117,6 +116,7 @@ async fn check_update(app: tauri::AppHandle) -> Result<Option<Value>, String> {
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
     use tauri::Emitter;
+    use std::sync::{Arc, Mutex};
 
     let update = app
         .updater()
@@ -129,20 +129,25 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
         return Err("No update available".to_string());
     };
 
-    let app_clone = app.clone();
-    let mut downloaded: u64 = 0;
+    // Both closures need their own owned handles
+    let app_progress = app.clone();
+    let app_finish   = app.clone();
+    let downloaded   = Arc::new(Mutex::new(0u64));
+    let downloaded2  = downloaded.clone();
 
     update
         .download_and_install(
             move |chunk, total| {
-                downloaded += chunk as u64;
-                app_clone.emit("update-progress", json!({
-                    "downloaded": downloaded,
+                let mut dl = downloaded.lock().unwrap();
+                *dl += chunk as u64;
+                app_progress.emit("update-progress", json!({
+                    "downloaded": *dl,
                     "total":      total,
                 })).ok();
             },
             move || {
-                app.emit("update-progress", json!({ "finished": true })).ok();
+                let _ = downloaded2; // keep alive
+                app_finish.emit("update-progress", json!({ "finished": true })).ok();
             },
         )
         .await
