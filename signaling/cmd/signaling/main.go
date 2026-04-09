@@ -187,6 +187,18 @@ func (p *Peer) readPump(h *Hub) {
 			p.fingerprint = msg.From
 			p.room = msg.Room
 			room := h.room(msg.Room)
+
+			// Tell the new peer about everyone already in the room
+			room.mu.RLock()
+			for fp := range room.peers {
+				if fp != p.fingerprint {
+					existing, _ := json.Marshal(Message{Type: MsgJoin, Room: p.room, From: fp})
+					p.send <- existing
+				}
+			}
+			room.mu.RUnlock()
+
+			// Add the new peer, then tell everyone else they joined
 			room.add(p)
 			room.broadcast(raw, p.fingerprint)
 			h.log.Info("peer joined", zap.String("fp", p.fingerprint), zap.String("room", p.room),

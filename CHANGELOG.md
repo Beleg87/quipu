@@ -1,18 +1,6 @@
-﻿## [0.1.2] - 2026-04-09
+﻿## [0.1.4] - 2026-04-09
 
-Auto-update, chat relay fix, voice channels
-
-## [0.1.2] - 2026-04-09
-
-Auto-update, chat relay fix, voice channels
-
-## [0.1.2] - 2026-04-09
-
-Auto-update, chat relay fix, voice channels
-
-## [0.1.2] - 2026-04-09
-
-Auto-update, chat relay fix, voice channels
+Fix peer discovery, add chat channels with history
 
 # Changelog
 

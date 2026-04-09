@@ -32,14 +32,16 @@ fn load_config(app: tauri::AppHandle) -> Result<Value, String> {
     Ok(json!({
         "server_url": store.get("server_url").unwrap_or(json!("")),
         "room":       store.get("room").unwrap_or(json!("quipu-main")),
+        "nickname":   store.get("nickname").unwrap_or(json!("")),
     }))
 }
 
 #[tauri::command]
-fn save_config(app: tauri::AppHandle, server_url: String, room: String) -> Result<(), String> {
+fn save_config(app: tauri::AppHandle, server_url: String, room: String, nickname: String) -> Result<(), String> {
     let store = app.store("quipu.json").map_err(|e| e.to_string())?;
     store.set("server_url", json!(server_url));
     store.set("room", json!(room));
+    store.set("nickname", json!(nickname));
     store.save().map_err(|e| e.to_string())
 }
 
