@@ -194,6 +194,13 @@ function buildShell(version: string): string {
             </label>
             <p class="settings-hint">This is your permanent identity. Share it with friends so they can verify you.</p>
           </section>
+          <section class="settings-section">
+            <h2>Updates</h2>
+            <div class="settings-actions">
+              <button class="btn-primary" id="update-check-btn">Check for updates</button>
+            </div>
+            <div id="update-status" class="update-status"></div>
+          </section>
         </div>
       </main>
     </div>
@@ -322,6 +329,83 @@ function bindSettingsButtons() {
         });
     }
   });
+
+  document.getElementById("update-check-btn")?.addEventListener("click", checkForUpdates);
+}
+
+// ── Updates ───────────────────────────────────────────────────────────────────
+
+function setUpdateStatus(html: string, cls = "") {
+  const el = document.getElementById("update-status");
+  if (el) { el.innerHTML = html; el.className = `update-status ${cls}`; }
+}
+
+async function checkForUpdates() {
+  const btn = document.getElementById("update-check-btn") as HTMLButtonElement;
+  btn.disabled = true;
+  setUpdateStatus("Checking for updates…");
+
+  try {
+    const update = await invoke<{
+      version: string;
+      current_version: string;
+      body: string | null;
+      date: string | null;
+    } | null>("check_update");
+
+    if (!update) {
+      setUpdateStatus(`✓ You're on the latest version.`, "ok");
+      btn.disabled = false;
+      return;
+    }
+
+    setUpdateStatus(`
+      <strong>Update available: v${update.version}</strong>
+      ${update.body ? `<p class="update-notes">${escapeHtml(update.body)}</p>` : ""}
+      <div class="settings-actions" style="margin-top:0.75rem">
+        <button class="btn-primary" id="update-install-btn">Install update</button>
+      </div>
+      <p id="update-dl-status" class="settings-hint"></p>
+    `);
+
+    document.getElementById("update-install-btn")?.addEventListener("click", installUpdate);
+  } catch (e: any) {
+    setUpdateStatus(`⚠ Update check failed: ${e}`, "error");
+    btn.disabled = false;
+  }
+}
+
+async function installUpdate() {
+  const installBtn = document.getElementById("update-install-btn") as HTMLButtonElement;
+  const dlStatus   = document.getElementById("update-dl-status")!;
+  installBtn.disabled = true;
+  dlStatus.textContent = "Starting download…";
+
+  // Listen for progress events from Rust
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen<{ downloaded?: number; total?: number | null; finished?: boolean }>(
+    "update-progress",
+    (ev) => {
+      const d = ev.payload;
+      if (d.finished) {
+        dlStatus.textContent = "Installing… the app will restart shortly.";
+      } else if (d.downloaded != null) {
+        const pct = d.total ? Math.round((d.downloaded / d.total) * 100) : "…";
+        const mb  = (d.downloaded / 1024 / 1024).toFixed(1);
+        dlStatus.textContent = `Downloading: ${mb} MB (${pct}%)`;
+      }
+    }
+  );
+
+  try {
+    await invoke("install_update");
+    // On Windows the app exits automatically after install — if we're still here, clean up
+    unlisten();
+  } catch (e: any) {
+    unlisten();
+    dlStatus.textContent = `Install failed: ${e}`;
+    installBtn.disabled = false;
+  }
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────

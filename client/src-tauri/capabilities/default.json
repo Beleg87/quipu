@@ -15,6 +15,8 @@
     "core:window:allow-is-minimized",
     "core:window:allow-is-focused",
     "core:window:allow-is-visible",
-    "store:default"
+    "store:default",
+    "updater:default",
+    "process:default"
   ]
 }

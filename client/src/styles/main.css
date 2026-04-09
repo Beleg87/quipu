@@ -300,6 +300,13 @@ body {
 .settings-hint.ok    { color: var(--ok); }
 .settings-hint.error { color: var(--danger); }
 
+/* ── Update status ── */
+.update-status { font-size: 0.8rem; color: var(--text); line-height: 1.6; }
+.update-status strong { color: var(--accent-hi); }
+.update-status.ok    { color: var(--ok); }
+.update-status.error { color: var(--danger); }
+.update-notes { color: var(--muted); margin-top: 0.4rem; white-space: pre-wrap; }
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar       { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }

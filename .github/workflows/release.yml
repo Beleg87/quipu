@@ -5,7 +5,6 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-nightly.[0-9]+"
 
 jobs:
   build-client:
@@ -17,55 +16,76 @@ jobs:
           - platform: windows-latest
             args: ""
     runs-on: ${{ matrix.platform }}
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+
       - uses: pnpm/action-setup@v4
         with:
           version: 9
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
+
       - uses: dtolnay/rust-toolchain@stable
+
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "client/src-tauri -> target"
+
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
         working-directory: client
-      - name: Build Tauri app
+
+      - name: Build Tauri app + updater artifacts
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          GITHUB_TOKEN:                       ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY:          ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          projectPath: client
-          tagName: ${{ github.ref_name }}
-          releaseName: "Quipu ${{ github.ref_name }}"
-          releaseBody: "See CHANGELOG.md for details."
-          releaseDraft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          args: ${{ matrix.args }}
+          projectPath:          client
+          tagName:              ${{ github.ref_name }}
+          releaseName:          "Quipu ${{ github.ref_name }}"
+          releaseBody:          |
+            ## What's new
+            See [CHANGELOG.md](https://github.com/quipu-app/quipu/blob/main/CHANGELOG.md) for details.
+
+            ## Install
+            Download **Quipu_*_x64-setup.exe** and run it.
+            Existing users will be prompted to update automatically.
+          releaseDraft:         false
+          prerelease:           ${{ contains(github.ref_name, '-') }}
+          includeUpdaterJson:   true
+          updaterJsonPreferNsis: true
+          args:                 ${{ matrix.args }}
 
   build-signaling:
     name: Build Signaling Server
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
           cache: true
+
       - name: Cross-compile
         env:
           CGO_ENABLED: "0"
         run: |
           cd signaling
           mkdir -p ../dist
-          GOOS=linux   GOARCH=amd64 go build -o ../dist/quipu-signaling-linux-amd64      ./cmd/signaling
-          GOOS=windows GOARCH=amd64 go build -o ../dist/quipu-signaling-windows-amd64.exe ./cmd/signaling
+          GOOS=linux   GOARCH=amd64 go build -o ../dist/quipu-signaling-linux-amd64       ./cmd/signaling
+          GOOS=windows GOARCH=amd64 go build -o ../dist/quipu-signaling-windows-amd64.exe  ./cmd/signaling
+
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
