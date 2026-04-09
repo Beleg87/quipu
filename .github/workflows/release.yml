@@ -72,24 +72,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
-          cache: true
-          cache-dependency-path: signaling/go.sum
-
-      - name: Tidy and fetch modules
-        working-directory: signaling
-        run: |
-          go mod tidy
-          go mod download
 
       - name: Cross-compile
         working-directory: signaling
         env:
           CGO_ENABLED: "0"
+          GONOSUMCHECK: "*"
           GOFLAGS: "-mod=mod"
+          GONOSUMDB: "*"
+          GOPATH: "/home/runner/go"
         run: |
+          go mod tidy
           mkdir -p ../dist
-          GOOS=linux   GOARCH=amd64 go build -o ../dist/quipu-signaling-linux-amd64       ./cmd/signaling
-          GOOS=windows GOARCH=amd64 go build -o ../dist/quipu-signaling-windows-amd64.exe  ./cmd/signaling
+          GOOS=linux   GOARCH=amd64 go build -mod=mod -o ../dist/quipu-signaling-linux-amd64       ./cmd/signaling
+          GOOS=windows GOARCH=amd64 go build -mod=mod -o ../dist/quipu-signaling-windows-amd64.exe  ./cmd/signaling
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
