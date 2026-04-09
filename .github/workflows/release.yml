@@ -24,7 +24,6 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9
-          package_json_file: client/package.json
 
       - uses: actions/setup-node@v4
         with:
@@ -37,7 +36,7 @@ jobs:
           workspaces: "client/src-tauri -> target"
 
       - name: Install frontend deps
-        run: pnpm install --dir client
+        run: pnpm install
 
       - name: Build Tauri app + updater artifacts
         uses: tauri-apps/tauri-action@v0

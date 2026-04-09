@@ -52,12 +52,10 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9
-          # Tell pnpm where the package is — avoids workspace detection at repo root
-          package_json_file: client/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Install deps
-        run: pnpm install --dir client
+        run: pnpm install
       - name: Build
-        run: pnpm --dir client run build
+        run: pnpm --filter quipu-client build
