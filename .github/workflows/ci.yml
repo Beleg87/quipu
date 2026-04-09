@@ -52,12 +52,12 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 9
+          # Tell pnpm where the package is — avoids workspace detection at repo root
+          package_json_file: client/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Install deps
-        run: pnpm install
-        working-directory: client
+        run: pnpm install --dir client
       - name: Build
-        run: pnpm build
-        working-directory: client
+        run: pnpm --dir client run build

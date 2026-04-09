@@ -25,3 +25,8 @@ Thumbs.db
 # Secrets
 *.pem
 *.key
+
+# Key files — never commit
+.tauri/
+*.key
+*.key.pub
