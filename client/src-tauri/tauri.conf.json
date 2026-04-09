@@ -1,63 +1,63 @@
 {
-    "$schema":  "https://schema.tauri.app/config/2",
-    "productName":  "Quipu",
-    "version":  "0.1.2",
-    "identifier":  "app.quipu",
-    "build":  {
-                  "frontendDist":  "../dist",
-                  "devUrl":  "http://localhost:1420",
-                  "beforeDevCommand":  "pnpm dev",
-                  "beforeBuildCommand":  "pnpm build"
-              },
-    "bundle":  {
-                   "active":  true,
-                   "targets":  "all",
-                   "createUpdaterArtifacts":  true,
-                   "icon":  [
-                                "icons/32x32.png",
-                                "icons/128x128.png",
-                                "icons/128x128@2x.png",
-                                "icons/icon.icns",
-                                "icons/icon.ico"
-                            ],
-                   "publisher":  "Quipu App",
-                   "copyright":  "© 2025 Quipu App",
-                   "shortDescription":  "Decentralized P2P voice and chat",
-                   "longDescription":  "Quipu is an open-source, self-hosted, end-to-end encrypted voice and chat application. No accounts, no central servers.",
-                   "windows":  {
-                                   "certificateThumbprint":  null,
-                                   "digestAlgorithm":  "sha256",
-                                   "timestampUrl":  ""
-                               }
-               },
-    "app":  {
-                "windows":  [
-                                {
-                                    "label":  "main",
-                                    "title":  "Quipu",
-                                    "width":  1024,
-                                    "height":  720,
-                                    "minWidth":  760,
-                                    "minHeight":  520,
-                                    "decorations":  false,
-                                    "transparent":  false,
-                                    "resizable":  true,
-                                    "fullscreen":  false
-                                }
-                            ],
-                "security":  {
-                                 "csp":  null
-                             }
-            },
-    "plugins":  {
-                    "updater":  {
-                                    "pubkey":  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJBNDU1RkY1RTBFNTJEMEQKUldRTkxlWGc5VjlGdXNRMjdybmJ2aDBtQnY4U041MmFqaUN5dFJuQ3gwTTJuNGtlS1Bsb1RjUWgK",
-                                    "endpoints":  [
-                                                      "https://github.com/Beleg87/quipu/releases/latest/download/latest.json"
-                                                  ],
-                                    "windows":  {
-                                                    "installMode":  "passive"
-                                                }
-                                }
-                }
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Quipu",
+  "version": "0.1.1",
+  "identifier": "app.quipu",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "pnpm --filter quipu-client dev",
+    "beforeBuildCommand": "pnpm --filter quipu-client build"
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "publisher": "Quipu App",
+    "copyright": "\u00a9 2025 Quipu App",
+    "shortDescription": "Decentralized P2P voice and chat",
+    "longDescription": "Quipu is an open-source, self-hosted, end-to-end encrypted voice and chat application. No accounts, no central servers.",
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Quipu",
+        "width": 1024,
+        "height": 720,
+        "minWidth": 760,
+        "minHeight": 520,
+        "decorations": false,
+        "transparent": false,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJBNDU1RkY1RTBFNTJEMEQKUldRTkxlWGc5VjlGdXNRMjdybmJ2aDBtQnY4U041MmFqaUN5dFJuQ3gwTTJuNGtlS1Bsb1RjUWgK",
+      "endpoints": [
+        "https://github.com/Beleg87/quipu/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
 }

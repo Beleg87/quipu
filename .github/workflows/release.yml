@@ -38,6 +38,9 @@ jobs:
       - name: Install frontend deps
         run: pnpm install
 
+      - name: Build frontend
+        run: pnpm --filter quipu-client run build
+
       - name: Build Tauri app + updater artifacts
         uses: tauri-apps/tauri-action@v0
         env:
@@ -46,7 +49,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath:           client
-          tauriScript:           pnpm tauri
+          # Don't use tauriScript — let tauri-action invoke the Tauri CLI directly
+          # after we've already built the frontend above
           tagName:               ${{ github.ref_name }}
           releaseName:           "Quipu ${{ github.ref_name }}"
           releaseBody:           |
