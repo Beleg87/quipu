@@ -46,15 +46,16 @@ async function init() {
   setupNav();
   setupChat();
   setupVoice();
-  bindSettingsButtons();   // DOM exists now — bind once, cleanly
+  bindSettingsButtons();
+
+  // Register event listeners BEFORE loading identity/config so no events
+  // can fire between connection and listener registration
+  await listen<any>("signaling-message", (ev) => onSignalingMessage(ev.payload));
+  await listen<any>("signaling-status",  (ev) => onSignalingStatus(ev.payload));
 
   // Load identity + config from persistent store
   await loadIdentity();
   await loadConfig();
-
-  // Wire signaling events from Rust backend
-  await listen<string>("signaling-message", (ev) => onSignalingMessage(ev.payload));
-  await listen<any>("signaling-status",  (ev) => onSignalingStatus(ev.payload));
 
   showView("home");
 }
@@ -263,17 +264,18 @@ async function onSignalingStatus(payload: { connected: boolean; fingerprint?: st
   }
 }
 
-async function onSignalingMessage(raw: string) {
-  let msg: any;
-  try { msg = JSON.parse(raw); } catch { return; }
+async function onSignalingMessage(msg: any) {
+  // msg is already a parsed object — Rust emits serde_json::Value,
+  // Tauri deserializes it for us before calling this handler
+  if (!msg || typeof msg !== "object") return;
 
   switch (msg.type) {
-    case "join":      onPeerJoined(msg.from);      break;
-    case "leave":     onPeerLeft(msg.from);        break;
-    case "chat":      onChatMessage(msg);           break;
-    case "offer":     onRtcOffer(msg);             break;
-    case "answer":    onRtcAnswer(msg);            break;
-    case "candidate": onRtcCandidate(msg);         break;
+    case "join":      onPeerJoined(msg.from);  break;
+    case "leave":     onPeerLeft(msg.from);    break;
+    case "chat":      onChatMessage(msg);       break;
+    case "offer":     onRtcOffer(msg);         break;
+    case "answer":    onRtcAnswer(msg);        break;
+    case "candidate": onRtcCandidate(msg);     break;
   }
 }
 
@@ -340,10 +342,17 @@ function setupChat() {
     // Show locally immediately
     pushChatMessage({ id: chatNextId++, from: "me", text, ts: new Date() });
 
-    // Send via signaling relay if connected
-    if (state.connected) {
-      invoke("send_chat", { text, fingerprint: state.fingerprint, room: state.room })
-        .catch(e => console.error("send_chat failed:", e));
+    // Always attempt to send — if not connected, send_raw returns an error
+    // which we surface in the chat window rather than swallowing silently
+    try {
+      await invoke("send_chat", { text, fingerprint: state.fingerprint, room: state.room });
+    } catch (e: any) {
+      pushChatMessage({
+        id: chatNextId++,
+        from: "system",
+        text: `⚠ Not sent: ${e}`,
+        ts: new Date(),
+      });
     }
   };
 
@@ -363,12 +372,15 @@ function pushChatMessage(msg: ChatMessage) {
   chatLog.push(msg);
   const container = document.getElementById("chat-messages");
   if (!container) return;
-  const isSelf = msg.from === "me";
-  const time   = msg.ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const label  = isSelf ? "you" : msg.from.slice(0, 8);
-  const el     = document.createElement("div");
-  el.className = `msg ${isSelf ? "msg-self" : "msg-peer"}`;
-  el.innerHTML = `<span class="msg-meta">${label} · ${time}</span><span class="msg-body">${escapeHtml(msg.text)}</span>`;
+  const isSystem = msg.from === "system";
+  const isSelf   = msg.from === "me";
+  const time     = msg.ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const label    = isSystem ? "" : isSelf ? "you" : msg.from.slice(0, 8);
+  const el       = document.createElement("div");
+  el.className   = `msg ${isSystem ? "msg-system" : isSelf ? "msg-self" : "msg-peer"}`;
+  el.innerHTML   = isSystem
+    ? `<span class="msg-body">${escapeHtml(msg.text)}</span>`
+    : `<span class="msg-meta">${label} · ${time}</span><span class="msg-body">${escapeHtml(msg.text)}</span>`;
   container.appendChild(el);
   scrollChatToBottom();
 }

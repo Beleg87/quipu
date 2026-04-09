@@ -104,8 +104,12 @@ impl SignalingHandle {
             while let Some(msg) = read.next().await {
                 match msg {
                     Ok(WsMsg::Text(txt)) => {
-                        // Forward raw JSON to frontend — it handles routing
-                        app_read.emit("signaling-message", txt.to_string()).ok();
+                        // Parse to Value so Tauri emits it as a proper JSON object,
+                        // not a double-encoded string. The frontend receives ev.payload
+                        // as an already-parsed JS object — no JSON.parse needed.
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
+                            app_read.emit("signaling-message", val).ok();
+                        }
                     }
                     Ok(WsMsg::Close(_)) | Err(_) => break,
                     _ => {}
@@ -115,7 +119,7 @@ impl SignalingHandle {
             let mut s = handle.lock().await;
             s.connected = false;
             s.tx = None;
-            app_read.emit("signaling-status", json!({ "connected": false })).ok();
+            app_read.emit("signaling-status", serde_json::json!({ "connected": false })).ok();
         });
 
         Ok(())

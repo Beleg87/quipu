@@ -222,6 +222,8 @@ body {
   border-radius: var(--radius) var(--radius) 2px var(--radius);
 }
 .msg-peer .msg-body { border-radius: var(--radius) var(--radius) var(--radius) 2px; }
+.msg-system { align-self: center; }
+.msg-system .msg-body { background: transparent; border: none; color: var(--danger); font-size: 0.75rem; padding: 0.2rem 0; }
 
 .chat-form {
   display: flex;
