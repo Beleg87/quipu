@@ -384,10 +384,11 @@ function setupChatInput(ch: string) {
     saveMsg(ch, { ...msg, ts: msg.ts.toISOString() });
     renderMsg(msg);
     try {
+      // All text channels share one signaling room. Channel routing is via prefix.
       await invoke("send_chat", {
         text: `__ch:${ch}:${text}`,
         fingerprint: state.fingerprint,
-        room:        ch,   // send to the text channel's room on the server
+        room: "quipu-main",
       });
     } catch (e: any) {
       renderMsg({ id: chatNextId++, from: "system", text: `⚠ Not sent: ${e}`, ts: new Date() });
@@ -596,10 +597,9 @@ async function onSignalingStatus(payload: { connected: boolean; fingerprint?: st
   if (payload.connected) {
     if (cfgStatus) { cfgStatus.textContent = "Connected"; cfgStatus.className = "settings-hint ok"; }
     broadcastNickname();
-    // Connect to each text channel's room to get history
-    for (const ch of state.textChannels) {
-      invoke("connect_signaling", { url: state.serverUrl, room: ch, fingerprint: state.fingerprint }).catch(() => {});
-    }
+    // Do NOT call connect_signaling again here — that causes an infinite loop.
+    // All text channels share the single "quipu-main" room connection.
+    // Only voice channels get their own room, handled separately in toggleVoiceChannel.
   } else {
     if (cfgStatus) { cfgStatus.textContent = "Disconnected"; cfgStatus.className = "settings-hint"; }
     if (state.activeVoice) leaveVoice();
@@ -659,13 +659,7 @@ function displayName(fp: string): string {
 
 function broadcastNickname() {
   if (!state.connected || !state.myNickname) return;
-  const nick = `__nick:${state.myNickname}`;
-  // Broadcast on the main signaling room
-  invoke("send_chat", { text: nick, fingerprint: state.fingerprint, room: "quipu-main" }).catch(() => {});
-  // Also broadcast on active voice channel room so voice peers get the nickname
-  if (state.activeVoice) {
-    invoke("send_chat", { text: nick, fingerprint: state.fingerprint, room: `voice-${state.activeVoice}` }).catch(() => {});
-  }
+  invoke("send_chat", { text: `__nick:${state.myNickname}`, fingerprint: state.fingerprint, room: "quipu-main" }).catch(() => {});
 }
 
 // ── Peer lifecycle ────────────────────────────────────────────────────────────
@@ -723,8 +717,7 @@ function onChatMessage(msg: any) {
 
 // ── Voice channels ────────────────────────────────────────────────────────────
 
-async function toggleVoiceChannel(ch: string) {
-  if (!state.connected) { alert("Connect to a server first (Settings)."); return; }
+async function toggleVoiceChannel(ch: string) {  if (!state.connected) { alert("Connect to a server first (Settings)."); return; }
   if (state.activeVoice === ch) { leaveVoice(); return; }
   if (state.activeVoice) leaveVoice();
   // Join the voice channel
@@ -741,11 +734,9 @@ async function toggleVoiceChannel(ch: string) {
   const voiceLabel  = document.getElementById("voice-status-label")!;
   voiceStatus.style.display = "flex";
   voiceLabel.textContent    = `🔊 ${ch}`;
-  // Connect to voice channel room on signaling server
-  await invoke("connect_signaling", { url: state.serverUrl, room: `voice-${ch}`, fingerprint: state.fingerprint })
-    .catch(() => {});
-  // Announce our nickname to voice peers immediately
+  // Announce our nickname to peers immediately
   broadcastNickname();
+  // Initiate WebRTC connections to all known peers over the existing signaling connection
   state.peers.forEach((_, fp) => createOrGetPC(fp, true));
   renderSidebar();
 }
@@ -779,14 +770,14 @@ function createOrGetPC(remoteFp: string, isInitiator: boolean): RTCPeerConnectio
   };
   pc.onicecandidate = (ev) => {
     if (!ev.candidate) return;
-    invoke("send_signal", { kind: "candidate", to: remoteFp, payload: ev.candidate.toJSON(), fingerprint: state.fingerprint, room: `voice-${state.activeVoice}` }).catch(console.error);
+    invoke("send_signal", { kind: "candidate", to: remoteFp, payload: ev.candidate.toJSON(), fingerprint: state.fingerprint, room: "quipu-main" }).catch(console.error);
   };
   pc.onconnectionstatechange = () => renderSidebar();
   state.peers.set(remoteFp, { fp: remoteFp, pc, muted: false });
   if (isInitiator) {
     pc.createOffer().then(offer => {
       pc.setLocalDescription(offer);
-      invoke("send_signal", { kind: "offer", to: remoteFp, payload: offer, fingerprint: state.fingerprint, room: `voice-${state.activeVoice}` }).catch(console.error);
+      invoke("send_signal", { kind: "offer", to: remoteFp, payload: offer, fingerprint: state.fingerprint, room: "quipu-main" }).catch(console.error);
     });
   }
   return pc;
@@ -798,7 +789,7 @@ async function onRtcOffer(msg: any) {
   await pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
-  await invoke("send_signal", { kind: "answer", to: msg.from, payload: answer, fingerprint: state.fingerprint, room: `voice-${state.activeVoice}` });
+  await invoke("send_signal", { kind: "answer", to: msg.from, payload: answer, fingerprint: state.fingerprint, room: "quipu-main" });
 }
 
 async function onRtcAnswer(msg: any) {

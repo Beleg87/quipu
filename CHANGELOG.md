@@ -1,6 +1,6 @@
-## [0.1.5] - 2026-04-09
+## [0.1.6] - 2026-04-10
 
-Fix voice peer list, fix nickname display in voice channels
+Fix infinite reconnect loop, stabilize signaling connection
 
 # Changelog
 
