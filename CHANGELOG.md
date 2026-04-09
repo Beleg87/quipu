@@ -1,6 +1,6 @@
-﻿## [0.1.4] - 2026-04-09
+## [0.1.4] - 2026-04-09
 
-Fix peer discovery, add chat channels with history
+Discord-style voice channels, chat history, settings overhaul
 
 # Changelog
 
@@ -10,7 +10,7 @@ All notable changes to Quipu are documented here.
 
 ## [Unreleased]
 
-## [0.1.0] â€” 2025-04-09
+## [0.1.0] — 2025-04-09
 
 ### Added
 - Repo scaffold: Tauri v2 client shell, Go signaling server, GitHub Actions CI/CD
@@ -19,7 +19,7 @@ All notable changes to Quipu are documented here.
 - E2EE text chat relayed through signaling server
 - Voice channel with WebRTC peer connections and Opus audio
 - Settings UI: signaling server URL, room name, fingerprint display
-- Auto-updater with progress UI in Settings â†’ Updates
-- Three-channel release pipeline: Nightly â†’ Beta â†’ Stable
+- Auto-updater with progress UI in Settings → Updates
+- Three-channel release pipeline: Nightly → Beta → Stable
 - Custom title bar with working minimize / maximize / close
 - Verdigris colour scheme (not Discord blue)

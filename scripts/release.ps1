@@ -1,6 +1,6 @@
 #!/usr/bin/env pwsh
 # release.ps1 - bump version, commit, tag, push
-# Usage: .\scripts\release.ps1 -Version 0.1.1 -Notes "What changed"
+# Usage: .\scripts\release.ps1 -Version 0.1.4 -Notes "What changed"
 
 param(
     [Parameter(Mandatory)][string]$Version,
@@ -8,50 +8,54 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
 
 if ($Version -notmatch '^\d+\.\d+\.\d+$') {
-    Write-Error "Version must be semver format: X.Y.Z  e.g. 0.1.1"
+    Write-Error "Version must be semver format: X.Y.Z"
     exit 1
 }
 
 $tag = "v$Version"
-
-if (git tag -l $tag) {
-    Write-Error "Tag $tag already exists"
-    exit 1
-}
+if (git tag -l $tag) { Write-Error "Tag $tag already exists"; exit 1 }
 
 Write-Host "Releasing Quipu $tag..." -ForegroundColor Cyan
 
 # ── Cargo.toml ────────────────────────────────────────────────────────────────
 $cargoPath = "client\src-tauri\Cargo.toml"
-$cargo = Get-Content $cargoPath -Raw
+$cargo = [System.IO.File]::ReadAllText("$PWD\$cargoPath")
 $cargo = $cargo -replace '(?m)^version\s*=\s*"[\d.]+"', ('version = "' + $Version + '"')
-Set-Content $cargoPath $cargo -NoNewline
+$cargo = $cargo -replace "`r`n", "`n" -replace "`r", "`n"
+[System.IO.File]::WriteAllText("$PWD\$cargoPath", $cargo, $utf8NoBom)
 Write-Host "  OK $cargoPath"
 
 # ── tauri.conf.json ───────────────────────────────────────────────────────────
 $tauriPath = "client\src-tauri\tauri.conf.json"
-$tauri = Get-Content $tauriPath -Raw | ConvertFrom-Json
-$tauri.version = $Version
-$tauri | ConvertTo-Json -Depth 10 | Set-Content $tauriPath
+$tauriText = [System.IO.File]::ReadAllText("$PWD\$tauriPath")
+$tauriObj  = $tauriText | ConvertFrom-Json
+$tauriObj.version = $Version
+$newJson = $tauriObj | ConvertTo-Json -Depth 10
+$newJson = $newJson -replace "`r`n", "`n" -replace "`r", "`n"
+[System.IO.File]::WriteAllText("$PWD\$tauriPath", $newJson, $utf8NoBom)
 Write-Host "  OK $tauriPath"
 
 # ── package.json ──────────────────────────────────────────────────────────────
 $pkgPath = "client\package.json"
-$pkg = Get-Content $pkgPath -Raw | ConvertFrom-Json
-$pkg.version = $Version
-$pkg | ConvertTo-Json -Depth 5 | Set-Content $pkgPath
+$pkgText = [System.IO.File]::ReadAllText("$PWD\$pkgPath")
+$pkgObj  = $pkgText | ConvertFrom-Json
+$pkgObj.version = $Version
+$newPkg = $pkgObj | ConvertTo-Json -Depth 5
+$newPkg = $newPkg -replace "`r`n", "`n" -replace "`r", "`n"
+[System.IO.File]::WriteAllText("$PWD\$pkgPath", $newPkg, $utf8NoBom)
 Write-Host "  OK $pkgPath"
 
 # ── CHANGELOG.md ──────────────────────────────────────────────────────────────
 $date     = Get-Date -Format "yyyy-MM-dd"
 $clPath   = "CHANGELOG.md"
-$existing = Get-Content $clPath -Raw
-$header   = "## [$Version] - $date"
-$newline  = [System.Environment]::NewLine
-$entry    = $header + $newline + $newline + $Notes + $newline + $newline
-Set-Content $clPath ($entry + $existing) -NoNewline -Encoding UTF8
+$existing = [System.IO.File]::ReadAllText("$PWD\$clPath")
+$entry    = "## [$Version] - $date`n`n$Notes`n`n"
+$combined = $entry + $existing
+$combined = $combined -replace "`r`n", "`n" -replace "`r", "`n"
+[System.IO.File]::WriteAllText("$PWD\$clPath", $combined, $utf8NoBom)
 Write-Host "  OK CHANGELOG.md"
 
 # ── Git ───────────────────────────────────────────────────────────────────────

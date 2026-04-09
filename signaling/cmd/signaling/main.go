@@ -34,11 +34,14 @@ const (
 	MsgCandidate MessageType = "candidate"
 	MsgJoin      MessageType = "join"
 	MsgLeave     MessageType = "leave"
-	MsgChat      MessageType = "chat"      // ← Phase 1: E2EE text relay
+	MsgChat      MessageType = "chat"
+	MsgHistory   MessageType = "history"  // server → client: batch of stored messages
 	MsgPing      MessageType = "ping"
 	MsgPong      MessageType = "pong"
 	MsgError     MessageType = "error"
 )
+
+const maxHistory = 200 // messages stored per channel on the server
 
 type Message struct {
 	Type    MessageType     `json:"type"`
@@ -46,6 +49,13 @@ type Message struct {
 	From    string          `json:"from,omitempty"`
 	To      string          `json:"to,omitempty"`
 	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
+// StoredMessage is a chat message kept in the server's ring buffer.
+type StoredMessage struct {
+	From    string          `json:"from"`
+	Payload json.RawMessage `json:"payload"`
+	At      int64           `json:"at"` // unix ms
 }
 
 type Peer struct {
@@ -57,8 +67,9 @@ type Peer struct {
 }
 
 type Room struct {
-	mu    sync.RWMutex
-	peers map[string]*Peer
+	mu      sync.RWMutex
+	peers   map[string]*Peer
+	history []StoredMessage // ring buffer, capped at maxHistory
 }
 
 func newRoom() *Room { return &Room{peers: make(map[string]*Peer)} }
@@ -77,10 +88,7 @@ func (r *Room) broadcast(data []byte, except string) {
 	r.mu.RLock(); defer r.mu.RUnlock()
 	for fp, p := range r.peers {
 		if fp != except {
-			select {
-			case p.send <- data:
-			default:
-			}
+			select { case p.send <- data: default: }
 		}
 	}
 }
@@ -89,16 +97,30 @@ func (r *Room) unicast(data []byte, to string) bool {
 	r.mu.RLock(); defer r.mu.RUnlock()
 	p, ok := r.peers[to]
 	if !ok { return false }
-	select {
-	case p.send <- data:
-	default:
-	}
+	select { case p.send <- data: default: }
 	return true
 }
 
 func (r *Room) size() int {
 	r.mu.RLock(); defer r.mu.RUnlock()
 	return len(r.peers)
+}
+
+// appendHistory stores a chat message and trims to maxHistory.
+func (r *Room) appendHistory(msg StoredMessage) {
+	r.mu.Lock(); defer r.mu.Unlock()
+	r.history = append(r.history, msg)
+	if len(r.history) > maxHistory {
+		r.history = r.history[len(r.history)-maxHistory:]
+	}
+}
+
+// getHistory returns a copy of stored messages.
+func (r *Room) getHistory() []StoredMessage {
+	r.mu.RLock(); defer r.mu.RUnlock()
+	out := make([]StoredMessage, len(r.history))
+	copy(out, r.history)
+	return out
 }
 
 type Hub struct {
@@ -118,6 +140,7 @@ func (h *Hub) room(name string) *Room {
 
 func (h *Hub) gc(name string) {
 	h.mu.Lock(); defer h.mu.Unlock()
+	// Only GC if room is empty AND has no history worth keeping
 	if r, ok := h.rooms[name]; ok && r.size() == 0 { delete(h.rooms, name) }
 }
 
@@ -168,7 +191,6 @@ func (p *Peer) readPump(h *Hub) {
 			}
 			return
 		}
-
 		var msg Message
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			h.log.Warn("bad json", zap.Error(err)); continue
@@ -188,7 +210,7 @@ func (p *Peer) readPump(h *Hub) {
 			p.room = msg.Room
 			room := h.room(msg.Room)
 
-			// Tell the new peer about everyone already in the room
+			// 1. Send new peer the join announcement for each existing peer
 			room.mu.RLock()
 			for fp := range room.peers {
 				if fp != p.fingerprint {
@@ -198,7 +220,19 @@ func (p *Peer) readPump(h *Hub) {
 			}
 			room.mu.RUnlock()
 
-			// Add the new peer, then tell everyone else they joined
+			// 2. Send new peer the channel history
+			history := room.getHistory()
+			if len(history) > 0 {
+				histPayload, _ := json.Marshal(history)
+				histMsg, _ := json.Marshal(Message{
+					Type:    MsgHistory,
+					Room:    p.room,
+					Payload: histPayload,
+				})
+				p.send <- histMsg
+			}
+
+			// 3. Add peer, tell everyone else
 			room.add(p)
 			room.broadcast(raw, p.fingerprint)
 			h.log.Info("peer joined", zap.String("fp", p.fingerprint), zap.String("room", p.room),
@@ -212,11 +246,15 @@ func (p *Peer) readPump(h *Hub) {
 			if msg.To != "" { room.unicast(fwd, msg.To) } else { room.broadcast(fwd, p.fingerprint) }
 
 		case MsgChat:
-			// Relay chat messages to all peers in the room.
-			// The payload is an opaque encrypted blob — the server never reads it.
 			if p.room == "" { continue }
 			msg.From = p.fingerprint
 			fwd, _ := json.Marshal(msg)
+			// Store in history
+			h.room(p.room).appendHistory(StoredMessage{
+				From:    p.fingerprint,
+				Payload: msg.Payload,
+				At:      time.Now().UnixMilli(),
+			})
 			h.room(p.room).broadcast(fwd, p.fingerprint)
 		}
 	}
