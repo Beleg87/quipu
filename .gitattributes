@@ -1,0 +1,8 @@
+client/src-tauri/tauri.conf.json text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.ts text eol=lf
+*.rs text eol=lf
+*.go text eol=lf
