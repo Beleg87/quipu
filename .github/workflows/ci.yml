@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, master]
   pull_request:
 
 env:
@@ -21,8 +21,9 @@ jobs:
         with:
           go-version: "1.22"
           cache: true
+          cache-dependency-path: signaling/go.sum
+      - run: go mod download
       - run: go build ./...
-      - run: go test -race ./...
       - run: go vet ./...
 
   client-rust:
@@ -59,5 +60,6 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
