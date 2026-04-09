@@ -12,8 +12,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// ── Config ────────────────────────────────────────────────────────────────────
-
 type Config struct {
 	Addr    string
 	TLSCert string
@@ -28,8 +26,6 @@ func configFromFlags() Config {
 	return Config{Addr: *addr, TLSCert: *cert, TLSKey: *key}
 }
 
-// ── Message types ─────────────────────────────────────────────────────────────
-
 type MessageType string
 
 const (
@@ -38,6 +34,7 @@ const (
 	MsgCandidate MessageType = "candidate"
 	MsgJoin      MessageType = "join"
 	MsgLeave     MessageType = "leave"
+	MsgChat      MessageType = "chat"      // ← Phase 1: E2EE text relay
 	MsgPing      MessageType = "ping"
 	MsgPong      MessageType = "pong"
 	MsgError     MessageType = "error"
@@ -46,12 +43,10 @@ const (
 type Message struct {
 	Type    MessageType     `json:"type"`
 	Room    string          `json:"room,omitempty"`
-	From    string          `json:"from,omitempty"`    // sender's public key fingerprint
-	To      string          `json:"to,omitempty"`      // recipient fingerprint (direct) or "" (broadcast)
+	From    string          `json:"from,omitempty"`
+	To      string          `json:"to,omitempty"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
-
-// ── Peer / Room ───────────────────────────────────────────────────────────────
 
 type Peer struct {
 	fingerprint string
@@ -63,46 +58,37 @@ type Peer struct {
 
 type Room struct {
 	mu    sync.RWMutex
-	peers map[string]*Peer // keyed by fingerprint
+	peers map[string]*Peer
 }
 
-func newRoom() *Room {
-	return &Room{peers: make(map[string]*Peer)}
-}
+func newRoom() *Room { return &Room{peers: make(map[string]*Peer)} }
 
 func (r *Room) add(p *Peer) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.Lock(); defer r.mu.Unlock()
 	r.peers[p.fingerprint] = p
 }
 
 func (r *Room) remove(fingerprint string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.Lock(); defer r.mu.Unlock()
 	delete(r.peers, fingerprint)
 }
 
 func (r *Room) broadcast(data []byte, except string) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.RLock(); defer r.mu.RUnlock()
 	for fp, p := range r.peers {
 		if fp != except {
 			select {
 			case p.send <- data:
 			default:
-				// slow consumer — drop frame rather than block
 			}
 		}
 	}
 }
 
 func (r *Room) unicast(data []byte, to string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.RLock(); defer r.mu.RUnlock()
 	p, ok := r.peers[to]
-	if !ok {
-		return false
-	}
+	if !ok { return false }
 	select {
 	case p.send <- data:
 	default:
@@ -111,12 +97,9 @@ func (r *Room) unicast(data []byte, to string) bool {
 }
 
 func (r *Room) size() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.RLock(); defer r.mu.RUnlock()
 	return len(r.peers)
 }
-
-// ── Hub ───────────────────────────────────────────────────────────────────────
 
 type Hub struct {
 	mu    sync.RWMutex
@@ -124,35 +107,23 @@ type Hub struct {
 	log   *zap.Logger
 }
 
-func newHub(log *zap.Logger) *Hub {
-	return &Hub{rooms: make(map[string]*Room), log: log}
-}
+func newHub(log *zap.Logger) *Hub { return &Hub{rooms: make(map[string]*Room), log: log} }
 
 func (h *Hub) room(name string) *Room {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.mu.Lock(); defer h.mu.Unlock()
 	r, ok := h.rooms[name]
-	if !ok {
-		r = newRoom()
-		h.rooms[name] = r
-	}
+	if !ok { r = newRoom(); h.rooms[name] = r }
 	return r
 }
 
 func (h *Hub) gc(name string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if r, ok := h.rooms[name]; ok && r.size() == 0 {
-		delete(h.rooms, name)
-	}
+	h.mu.Lock(); defer h.mu.Unlock()
+	if r, ok := h.rooms[name]; ok && r.size() == 0 { delete(h.rooms, name) }
 }
 
-// ── WebSocket handler ─────────────────────────────────────────────────────────
-
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true }, // Tauri origin varies
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
+	CheckOrigin:    func(r *http.Request) bool { return true },
+	ReadBufferSize: 4096, WriteBufferSize: 4096,
 }
 
 const (
@@ -164,17 +135,8 @@ const (
 
 func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		h.log.Warn("upgrade failed", zap.Error(err))
-		return
-	}
-
-	peer := &Peer{
-		conn:     conn,
-		send:     make(chan []byte, 64),
-		joinedAt: time.Now(),
-	}
-
+	if err != nil { h.log.Warn("upgrade failed", zap.Error(err)); return }
+	peer := &Peer{conn: conn, send: make(chan []byte, 64), joinedAt: time.Now()}
 	go peer.writePump(h.log)
 	peer.readPump(h)
 }
@@ -186,7 +148,6 @@ func (p *Peer) readPump(h *Hub) {
 			room := h.room(p.room)
 			room.remove(p.fingerprint)
 			h.gc(p.room)
-			// notify remaining peers
 			leave, _ := json.Marshal(Message{Type: MsgLeave, Room: p.room, From: p.fingerprint})
 			room.broadcast(leave, p.fingerprint)
 			h.log.Info("peer left", zap.String("fp", p.fingerprint), zap.String("room", p.room))
@@ -210,8 +171,7 @@ func (p *Peer) readPump(h *Hub) {
 
 		var msg Message
 		if err := json.Unmarshal(raw, &msg); err != nil {
-			h.log.Warn("bad json", zap.Error(err))
-			continue
+			h.log.Warn("bad json", zap.Error(err)); continue
 		}
 
 		switch msg.Type {
@@ -222,8 +182,7 @@ func (p *Peer) readPump(h *Hub) {
 		case MsgJoin:
 			if msg.From == "" || msg.Room == "" {
 				errMsg, _ := json.Marshal(Message{Type: MsgError, Payload: json.RawMessage(`"from and room required"`)})
-				p.send <- errMsg
-				continue
+				p.send <- errMsg; continue
 			}
 			p.fingerprint = msg.From
 			p.room = msg.Room
@@ -234,69 +193,49 @@ func (p *Peer) readPump(h *Hub) {
 				zap.Int("peers", room.size()))
 
 		case MsgOffer, MsgAnswer, MsgCandidate:
-			if p.room == "" {
-				continue
-			}
+			if p.room == "" { continue }
 			msg.From = p.fingerprint
 			fwd, _ := json.Marshal(msg)
 			room := h.room(p.room)
-			if msg.To != "" {
-				room.unicast(fwd, msg.To)
-			} else {
-				room.broadcast(fwd, p.fingerprint)
-			}
+			if msg.To != "" { room.unicast(fwd, msg.To) } else { room.broadcast(fwd, p.fingerprint) }
+
+		case MsgChat:
+			// Relay chat messages to all peers in the room.
+			// The payload is an opaque encrypted blob — the server never reads it.
+			if p.room == "" { continue }
+			msg.From = p.fingerprint
+			fwd, _ := json.Marshal(msg)
+			h.room(p.room).broadcast(fwd, p.fingerprint)
 		}
 	}
 }
 
 func (p *Peer) writePump(log *zap.Logger) {
 	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		p.conn.Close()
-	}()
-
+	defer func() { ticker.Stop(); p.conn.Close() }()
 	for {
 		select {
 		case data, ok := <-p.send:
 			_ = p.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				_ = p.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
+			if !ok { _ = p.conn.WriteMessage(websocket.CloseMessage, []byte{}); return }
 			if err := p.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-				log.Warn("write error", zap.Error(err))
-				return
+				log.Warn("write error", zap.Error(err)); return
 			}
-
 		case <-ticker.C:
 			_ = p.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := p.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
+			if err := p.conn.WriteMessage(websocket.PingMessage, nil); err != nil { return }
 		}
 	}
 }
 
-// ── Health / metrics endpoints ────────────────────────────────────────────────
-
 func (h *Hub) healthHandler(w http.ResponseWriter, _ *http.Request) {
-	h.mu.RLock()
-	roomCount := len(h.rooms)
-	h.mu.RUnlock()
+	h.mu.RLock(); roomCount := len(h.rooms); h.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"status": "ok",
-		"rooms":  roomCount,
-		"time":   time.Now().UTC(),
-	})
+	json.NewEncoder(w).Encode(map[string]any{"status": "ok", "rooms": roomCount, "time": time.Now().UTC()})
 }
-
-// ── Entry point ───────────────────────────────────────────────────────────────
 
 func main() {
 	cfg := configFromFlags()
-
 	var log *zap.Logger
 	var err error
 	if os.Getenv("QUIPU_ENV") == "production" {
@@ -304,25 +243,19 @@ func main() {
 	} else {
 		log, err = zap.NewDevelopment()
 	}
-	if err != nil {
-		panic(err)
-	}
-	defer log.Sync() //nolint:errcheck
+	if err != nil { panic(err) }
+	defer log.Sync()
 
 	hub := newHub(log)
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws",     hub.serveWS)
 	mux.HandleFunc("/health", hub.healthHandler)
 
 	log.Info("quipu signaling starting", zap.String("addr", cfg.Addr))
-
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		err = http.ListenAndServeTLS(cfg.Addr, cfg.TLSCert, cfg.TLSKey, mux)
 	} else {
 		err = http.ListenAndServe(cfg.Addr, mux)
 	}
-	if err != nil {
-		log.Fatal("server error", zap.Error(err))
-	}
+	if err != nil { log.Fatal("server error", zap.Error(err)) }
 }
