@@ -38,9 +38,6 @@ jobs:
       - name: Install frontend deps
         run: pnpm install
 
-      - name: Build frontend
-        run: pnpm --filter quipu-client run build
-
       - name: Build Tauri app + updater artifacts
         uses: tauri-apps/tauri-action@v0
         env:
@@ -49,8 +46,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath:           client
-          # Don't use tauriScript — let tauri-action invoke the Tauri CLI directly
-          # after we've already built the frontend above
           tagName:               ${{ github.ref_name }}
           releaseName:           "Quipu ${{ github.ref_name }}"
           releaseBody:           |
@@ -80,14 +75,17 @@ jobs:
           cache: true
           cache-dependency-path: signaling/go.sum
 
-      - name: Fetch Go modules
+      - name: Tidy and fetch modules
         working-directory: signaling
-        run: go mod download
+        run: |
+          go mod tidy
+          go mod download
 
       - name: Cross-compile
         working-directory: signaling
         env:
           CGO_ENABLED: "0"
+          GOFLAGS: "-mod=mod"
         run: |
           mkdir -p ../dist
           GOOS=linux   GOARCH=amd64 go build -o ../dist/quipu-signaling-linux-amd64       ./cmd/signaling
