@@ -1,6 +1,6 @@
-## [0.1.6] - 2026-04-10
+## [0.1.7] - 2026-04-10
 
-Fix infinite reconnect loop, stabilize signaling connection
+Redesigned UI, voice channels, per-peer volume, admin/mod system with persistent bans and mods, connection mode setting, AFK detection, drag peers between channels, auto-connect on voice join
 
 # Changelog
 

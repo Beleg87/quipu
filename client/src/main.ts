@@ -14,10 +14,18 @@ interface AppState {
   connected:     boolean;
   peers:         Map<string, PeerConn>;
   nicknames:     Map<string, string>;
-  activeVoice:   string | null;   // currently joined voice channel name
-  activeText:    string;          // currently viewed text channel
+  activeVoice:   string | null;
+  activeText:    string;
   textChannels:  string[];
   voiceChannels: string[];
+  iceMode:       "direct" | "relay";
+  turnUrl:       string;
+  turnUser:      string;
+  turnPass:      string;
+  myRole:        "admin" | "mod" | "member";
+  adminFp:       string;
+  modFps:        Set<string>;
+  bans:          Map<string, string>; // fp → reason
 }
 
 interface PeerConn {
@@ -39,14 +47,158 @@ const state: AppState = {
   activeText:    "general",
   textChannels:  ["general", "random"],
   voiceChannels: ["Main", "Gaming", "AFK"],
+  iceMode:       "direct",
+  turnUrl:       "",
+  turnUser:      "",
+  turnPass:      "",
+  myRole:        "member",
+  adminFp:       "",
+  modFps:        new Set(),
+  bans:          new Map(),
 };
 
-const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+// Build ICE server list based on current mode
+function getIceServers(): RTCIceServer[] {
+  const servers: RTCIceServer[] = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+  ];
+  if (state.iceMode === "relay" && state.turnUrl) {
+    servers.push({
+      urls:       state.turnUrl,
+      username:   state.turnUser,
+      credential: state.turnPass,
+    });
+    // Force relay-only so traffic always goes through TURN
+    // (prevents direct connection attempts that could reveal IPs)
+  }
+  return servers;
+}
 let localStream: MediaStream | null = null;
 let chatNextId = 1;
 
 // Separate set tracking fingerprints of peers in the current voice channel
 const voicePeers: Set<string> = new Set();
+
+// Per-peer volume (0–200, where 100 = normal)
+const peerVolumes: Map<string, number> = new Map();
+
+function getPeerVolume(fp: string): number {
+  return peerVolumes.get(fp) ?? 100;
+}
+
+function setPeerVolume(fp: string, vol: number) {
+  peerVolumes.set(fp, vol);
+  const audio = document.getElementById(`audio-${fp}`) as HTMLAudioElement | null;
+  if (audio) audio.volume = Math.min(vol / 100, 1.0);
+  // For >100% we use a GainNode if available — handled in applyVolumeBoost
+  applyVolumeBoost(fp, vol);
+}
+
+// AudioContext gain nodes for >100% volume boost per peer
+const gainNodes: Map<string, { ctx: AudioContext; gain: GainNode }> = new Map();
+
+function applyVolumeBoost(fp: string, vol: number) {
+  const audio = document.getElementById(`audio-${fp}`) as HTMLAudioElement | null;
+  if (!audio || !audio.srcObject) return;
+  if (vol <= 100) {
+    // Just use the audio element volume, no Web Audio needed
+    audio.volume = vol / 100;
+    gainNodes.delete(fp);
+    return;
+  }
+  // vol > 100: use Web Audio API GainNode
+  let node = gainNodes.get(fp);
+  if (!node) {
+    const ctx  = new AudioContext();
+    const src  = ctx.createMediaElementSource(audio);
+    const gain = ctx.createGain();
+    src.connect(gain);
+    gain.connect(ctx.destination);
+    node = { ctx, gain };
+    gainNodes.set(fp, node);
+    audio.volume = 1.0; // let GainNode handle the boost
+  }
+  node.gain.gain.value = vol / 100;
+}
+
+// ── AFK silence detection ─────────────────────────────────────────────────────
+
+let afkTimer: ReturnType<typeof setTimeout> | null = null;
+let afkAnalyser: AnalyserNode | null = null;
+const AFK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+function startAfkDetection() {
+  stopAfkDetection();
+  if (!localStream) return;
+  try {
+    const ctx      = new AudioContext();
+    const src      = ctx.createMediaStreamSource(localStream);
+    afkAnalyser    = ctx.createAnalyser();
+    afkAnalyser.fftSize = 256;
+    src.connect(afkAnalyser);
+    checkSilence();
+  } catch (e) { console.warn("AFK detection failed to init:", e); }
+}
+
+function checkSilence() {
+  if (!afkAnalyser || !state.activeVoice) return;
+  const data = new Uint8Array(afkAnalyser.frequencyBinCount);
+  afkAnalyser.getByteFrequencyData(data);
+  const max = Math.max(...data);
+  if (max > 10) {
+    // Sound detected — reset AFK timer, send activity heartbeat to server
+    if (afkTimer) { clearTimeout(afkTimer); afkTimer = null; }
+    invoke("send_activity", { fingerprint: state.fingerprint, room: "quipu-main" }).catch(() => {});
+    afkTimer = setTimeout(() => {
+      // silence for AFK_TIMEOUT_MS — server's own ticker will send the move command
+    }, AFK_TIMEOUT_MS);
+  }
+  if (state.activeVoice) requestAnimationFrame(checkSilence);
+}
+
+function stopAfkDetection() {
+  if (afkTimer) { clearTimeout(afkTimer); afkTimer = null; }
+  afkAnalyser = null;
+}
+
+// ── Role helpers ──────────────────────────────────────────────────────────────
+
+function roleBadge(fp: string): string {
+  if (fp === state.adminFp)    return `<span class="role-badge admin" title="Admin">⚑</span>`;
+  if (state.modFps.has(fp))   return `<span class="role-badge mod" title="Mod">★</span>`;
+  return "";
+}
+
+function isPrivileged(): boolean {
+  return state.myRole === "admin" || state.myRole === "mod";
+}
+
+// ── Moderation actions ────────────────────────────────────────────────────────
+
+async function sendKick(targetFp: string) {
+  if (!confirm(`Kick ${displayName(targetFp)}?`)) return;
+  await invoke("send_moderation", { action: "kick", payload: { target: targetFp }, fingerprint: state.fingerprint, room: "quipu-main" }).catch(console.error);
+}
+
+async function sendBan(targetFp: string) {
+  const reason = prompt(`Ban reason for ${displayName(targetFp)}:`);
+  if (reason === null) return;
+  await invoke("send_moderation", { action: "ban", payload: { target: targetFp, reason: reason || "banned" }, fingerprint: state.fingerprint, room: "quipu-main" }).catch(console.error);
+}
+
+async function sendUnban(targetFp: string) {
+  if (!confirm(`Unban ${targetFp.slice(0, 12)}…?`)) return;
+  await invoke("send_moderation", { action: "unban", payload: { target: targetFp }, fingerprint: state.fingerprint, room: "quipu-main" }).catch(console.error);
+}
+
+async function sendPromote(targetFp: string, role: "mod" | "member") {
+  await invoke("send_moderation", { action: "promote", payload: { target: targetFp, role }, fingerprint: state.fingerprint, room: "quipu-main" }).catch(console.error);
+}
+
+async function sendMove(targetFp: string, channel: string) {
+  await invoke("send_moderation", { action: "move", payload: { target: targetFp, channel }, fingerprint: state.fingerprint, room: "quipu-main" }).catch(console.error);
+}
 
 // ── Persistence helpers ───────────────────────────────────────────────────────
 
@@ -120,9 +272,13 @@ async function loadIdentity() {
 
 async function loadConfig() {
   try {
-    const cfg = await invoke<{ server_url: string; room: string; nickname: string }>("load_config");
+    const cfg = await invoke<{ server_url: string; room: string; nickname: string; ice_mode: string; turn_url: string; turn_user: string; turn_pass: string }>("load_config");
     state.serverUrl  = cfg.server_url;
     state.myNickname = cfg.nickname || "";
+    state.iceMode    = (cfg.ice_mode === "relay") ? "relay" : "direct";
+    state.turnUrl    = cfg.turn_url  || "";
+    state.turnUser   = cfg.turn_user || "";
+    state.turnPass   = cfg.turn_pass || "";
     updateStatusBadge();
     prefillSettings();
   } catch (e) { console.error("config load failed:", e); }
@@ -209,6 +365,13 @@ function setupSidebar() {
 }
 
 function renderSidebar() {
+  // Show/hide channel management buttons based on role
+  const addTextBtn  = document.getElementById("add-text-ch-btn");
+  const addVoiceBtn = document.getElementById("add-voice-ch-btn");
+  const canManage   = isPrivileged();
+  if (addTextBtn)  addTextBtn.style.display  = canManage ? "" : "none";
+  if (addVoiceBtn) addVoiceBtn.style.display = canManage ? "" : "none";
+
   // Text channels
   const tList = document.getElementById("text-channel-list")!;
   if (tList) {
@@ -222,7 +385,7 @@ function renderSidebar() {
         <span class="ch-icon">#</span>
         <span class="ch-name">${escapeHtml(ch)}</span>
         <span class="ch-unread" id="unread-${ch}" style="display:none">●</span>
-        ${isDefault ? "" : `<button class="ch-del" data-ch="${ch}" data-type="text">×</button>`}`;
+        ${isDefault || !canManage ? "" : `<button class="ch-del" data-ch="${ch}" data-type="text">×</button>`}`;
       el.addEventListener("click", (e) => {
         if ((e.target as HTMLElement).classList.contains("ch-del")) return;
         showText(ch);
@@ -244,11 +407,25 @@ function renderSidebar() {
         <span class="ch-icon">🔊</span>
         <span class="ch-name">${escapeHtml(ch)}</span>
         ${isActive ? `<span class="ch-live">live</span>` : ""}
-        ${isDefault ? "" : `<button class="ch-del" data-ch="${ch}" data-type="voice">×</button>`}`;
+        ${isDefault || !canManage ? "" : `<button class="ch-del" data-ch="${ch}" data-type="voice">×</button>`}`;
       el.addEventListener("click", (e) => {
         if ((e.target as HTMLElement).classList.contains("ch-del")) return;
         toggleVoiceChannel(ch);
       });
+      // Drop target: admin/mod can drag peers onto channels to move them
+      if (isPrivileged()) {
+        el.addEventListener("dragover", (e) => {
+          e.preventDefault();
+          el.classList.add("drag-over");
+        });
+        el.addEventListener("dragleave", () => el.classList.remove("drag-over"));
+        el.addEventListener("drop", (e) => {
+          e.preventDefault();
+          el.classList.remove("drag-over");
+          const fp = (e as DragEvent).dataTransfer?.getData("text/plain");
+          if (fp && fp !== state.fingerprint) sendMove(fp, ch);
+        });
+      }
       vList.appendChild(el);
     });
     // Also show peers in active voice channel
@@ -260,16 +437,45 @@ function renderSidebar() {
         // Show yourself first
         const selfEl = document.createElement("div");
         selfEl.className = "voice-peer-item";
-        selfEl.innerHTML = `<span class="dot connected"></span><span>${escapeHtml(state.myNickname || state.fingerprint.slice(0, 8))}</span>`;
+        selfEl.innerHTML = `
+          <span class="dot connected"></span>
+          <span class="voice-peer-name">${roleBadge(state.fingerprint)}${escapeHtml(state.myNickname || state.fingerprint.slice(0, 8))}</span>
+          <span class="voice-peer-you">(you)</span>`;
         peersDiv.appendChild(selfEl);
-        // Show voice peers only
+        // Show each voice peer with volume slider and drag handle
         voicePeers.forEach(fp => {
+          const vol = getPeerVolume(fp);
           const pEl = document.createElement("div");
           pEl.className = "voice-peer-item";
-          pEl.innerHTML = `<span class="dot connected"></span><span>${escapeHtml(displayName(fp))}</span>`;
+          // Draggable for admin/mod to move peers between channels
+          const draggable = isPrivileged() ? `draggable="true" data-fp="${fp}"` : "";
+          pEl.innerHTML = `
+            ${isPrivileged() ? `<span class="drag-handle" title="Drag to move">⠿</span>` : ""}
+            <span class="dot connected"></span>
+            <span class="voice-peer-name">${roleBadge(fp)}${escapeHtml(displayName(fp))}</span>
+            <input class="peer-volume" type="range" min="0" max="200" value="${vol}"
+              data-fp="${fp}" title="Volume: ${vol}%" />`;
+          if (isPrivileged()) {
+            pEl.setAttribute("draggable", "true");
+            pEl.dataset.fp = fp;
+            pEl.addEventListener("dragstart", (e) => {
+              (e as DragEvent).dataTransfer?.setData("text/plain", fp);
+              pEl.classList.add("dragging");
+            });
+            pEl.addEventListener("dragend", () => pEl.classList.remove("dragging"));
+          }
           peersDiv.appendChild(pEl);
         });
         activeEl.after(peersDiv);
+        // Wire volume sliders
+        peersDiv.querySelectorAll(".peer-volume").forEach(slider => {
+          slider.addEventListener("input", () => {
+            const fp  = (slider as HTMLElement).dataset.fp!;
+            const val = parseInt((slider as HTMLInputElement).value);
+            setPeerVolume(fp, val);
+            slider.setAttribute("title", `Volume: ${val}%`);
+          });
+        });
       }
     }
   }
@@ -461,8 +667,72 @@ function showSettings() {
         <div id="peer-nickname-list"></div>
       </section>
 
+      <section class="settings-section" id="ban-list-section" style="${state.myRole !== 'member' ? '' : 'display:none'}">
+        <h2>Ban list</h2>
+        <div id="ban-list"></div>
+      </section>
+
       <section class="settings-section">
-        <h2>Updates</h2>
+        <h2>Connection mode</h2>
+        <div class="ice-mode-toggle">
+          <label class="ice-option">
+            <input type="radio" name="ice-mode" value="direct" id="ice-direct" />
+            <div class="ice-option-body">
+              <span class="ice-option-title">Direct (P2P)</span>
+              <span class="ice-option-desc">STUN only. Lowest latency. May fail behind strict NAT / CGNAT.</span>
+            </div>
+          </label>
+          <label class="ice-option">
+            <input type="radio" name="ice-mode" value="relay" id="ice-relay" />
+            <div class="ice-option-body">
+              <span class="ice-option-title">Relay (TURN)</span>
+              <span class="ice-option-desc">Routes voice through your TURN server. Fixes CGNAT. Slightly higher latency.</span>
+            </div>
+          </label>
+        </div>
+        <div id="turn-config" style="display:none">
+          <label class="field" style="margin-top:0.75rem"><span>TURN server URL</span>
+            <input id="cfg-turn-url" type="text" placeholder="turn:your.server:3478" spellcheck="false"
+              value="${escapeHtml(state.turnUrl)}" /></label>
+          <label class="field"><span>Username</span>
+            <input id="cfg-turn-user" type="text" placeholder="quipu"
+              value="${escapeHtml(state.turnUser)}" /></label>
+          <label class="field"><span>Credential</span>
+            <input id="cfg-turn-pass" type="password" placeholder="••••••••"
+              value="${escapeHtml(state.turnPass)}" /></label>
+        </div>
+        <div class="settings-actions">
+          <button class="btn-primary" id="cfg-save-ice-btn">Save connection mode</button>
+        </div>
+        <p class="settings-hint" id="ice-status"></p>
+        <p class="settings-hint" style="margin-top:0.4rem">
+          Need a TURN server? Run <code>coturn</code> on your gaming server —
+          see <a href="#" id="coturn-help-link">setup guide</a> below.
+        </p>
+      </section>
+
+      <section class="settings-section" id="coturn-guide" style="display:none">
+        <h2>coturn quick setup</h2>
+        <pre class="code-block"># On your gaming server (Linux):
+apt install coturn
+
+# /etc/turnserver.conf — minimal config:
+listening-port=3478
+fingerprint
+lt-cred-mech
+user=quipu:YOUR_PASSWORD
+realm=quipu
+total-quota=100
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+
+systemctl enable coturn
+systemctl start coturn</pre>
+        <p class="settings-hint" style="margin-top:0.5rem">
+          Then set TURN URL to <code>turn:YOUR_SERVER_IP:3478</code>,
+          username <code>quipu</code>, credential your password.
+        </p>
+      </section>
         <div class="settings-actions">
           <button class="btn-primary" id="update-check-btn">Check for updates</button>
         </div>
@@ -503,15 +773,70 @@ function showSettings() {
   });
 
   document.getElementById("update-check-btn")?.addEventListener("click", checkForUpdates);
+
+  // ── ICE / connection mode ──
+  // Set initial radio state
+  const directRadio = document.getElementById("ice-direct") as HTMLInputElement | null;
+  const relayRadio  = document.getElementById("ice-relay")  as HTMLInputElement | null;
+  const turnConfig  = document.getElementById("turn-config");
+  if (directRadio && relayRadio && turnConfig) {
+    directRadio.checked = state.iceMode === "direct";
+    relayRadio.checked  = state.iceMode === "relay";
+    turnConfig.style.display = state.iceMode === "relay" ? "block" : "none";
+    // Show/hide TURN fields when mode changes
+    [directRadio, relayRadio].forEach(r => {
+      r.addEventListener("change", () => {
+        turnConfig.style.display = relayRadio.checked ? "block" : "none";
+      });
+    });
+  }
+  document.getElementById("cfg-save-ice-btn")?.addEventListener("click", async () => {
+    const relay    = (document.getElementById("ice-relay") as HTMLInputElement)?.checked;
+    const turnUrl  = (document.getElementById("cfg-turn-url")  as HTMLInputElement)?.value.trim() || "";
+    const turnUser = (document.getElementById("cfg-turn-user") as HTMLInputElement)?.value.trim() || "";
+    const turnPass = (document.getElementById("cfg-turn-pass") as HTMLInputElement)?.value.trim() || "";
+    const iceStatus = document.getElementById("ice-status")!;
+    if (relay && !turnUrl) { iceStatus.textContent = "Enter a TURN server URL to use relay mode."; return; }
+    state.iceMode  = relay ? "relay" : "direct";
+    state.turnUrl  = turnUrl;
+    state.turnUser = turnUser;
+    state.turnPass = turnPass;
+    try {
+      await invoke("save_config", {
+        serverUrl: state.serverUrl, room: "quipu-main", nickname: state.myNickname,
+        iceMode: state.iceMode, turnUrl, turnUser, turnPass,
+      });
+      iceStatus.textContent = `Saved. Using ${state.iceMode === "relay" ? "TURN relay" : "direct P2P"} mode.`;
+      iceStatus.className = "settings-hint ok";
+    } catch (e: any) { iceStatus.textContent = `Save failed: ${e}`; }
+  });
+  // coturn guide toggle
+  document.getElementById("coturn-help-link")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    const guide = document.getElementById("coturn-guide");
+    if (guide) guide.style.display = guide.style.display === "none" ? "block" : "none";
+  });
 }
 
 function prefillSettings() {
-  const url  = document.getElementById("cfg-url")      as HTMLInputElement | null;
-  const nick = document.getElementById("cfg-nickname") as HTMLInputElement | null;
-  const fp   = document.getElementById("cfg-fp")       as HTMLInputElement | null;
-  if (url)  url.value  = state.serverUrl;
-  if (nick) nick.value = state.myNickname;
-  if (fp)   fp.value   = state.fingerprint;
+  const url      = document.getElementById("cfg-url")       as HTMLInputElement | null;
+  const nick     = document.getElementById("cfg-nickname")  as HTMLInputElement | null;
+  const fp       = document.getElementById("cfg-fp")        as HTMLInputElement | null;
+  const turnUrl  = document.getElementById("cfg-turn-url")  as HTMLInputElement | null;
+  const turnUser = document.getElementById("cfg-turn-user") as HTMLInputElement | null;
+  const turnPass = document.getElementById("cfg-turn-pass") as HTMLInputElement | null;
+  const turnCfg  = document.getElementById("turn-config");
+  const direct   = document.getElementById("ice-direct")    as HTMLInputElement | null;
+  const relay    = document.getElementById("ice-relay")     as HTMLInputElement | null;
+  if (url)      url.value      = state.serverUrl;
+  if (nick)     nick.value     = state.myNickname;
+  if (fp)       fp.value       = state.fingerprint;
+  if (turnUrl)  turnUrl.value  = state.turnUrl;
+  if (turnUser) turnUser.value = state.turnUser;
+  if (turnPass) turnPass.value = state.turnPass;
+  if (direct)   direct.checked = state.iceMode === "direct";
+  if (relay)    relay.checked  = state.iceMode === "relay";
+  if (turnCfg)  turnCfg.style.display = state.iceMode === "relay" ? "block" : "none";
 }
 
 function renderPeerNicknameList() {
@@ -520,21 +845,69 @@ function renderPeerNicknameList() {
   if (state.peers.size === 0) { list.innerHTML = `<p class="settings-hint">No peers connected.</p>`; return; }
   list.innerHTML = "";
   state.peers.forEach(peer => {
+    const fp   = peer.fp;
+    const isMod  = state.modFps.has(fp);
+    const isAdmin = fp === state.adminFp;
     const div = document.createElement("div");
     div.className = "peer-nick-row";
     div.innerHTML = `
-      <span class="peer-nick-fp">${peer.fp.slice(0, 16)}</span>
+      <span class="peer-nick-fp">${roleBadge(fp)}${fp.slice(0, 12)}</span>
       <input class="peer-nick-input" type="text" placeholder="Nickname…"
-        value="${escapeHtml(state.nicknames.get(peer.fp) || "")}" maxlength="32" data-fp="${peer.fp}" />
-      <button class="btn-secondary peer-nick-save" data-fp="${peer.fp}">Save</button>`;
+        value="${escapeHtml(state.nicknames.get(fp) || "")}" maxlength="32" data-fp="${fp}" />
+      <button class="btn-secondary peer-nick-save" data-fp="${fp}">Save</button>
+      ${isPrivileged() && !isAdmin ? `
+        <button class="btn-secondary mod-kick" data-fp="${fp}" title="Kick">⊗</button>
+        <button class="btn-danger mod-ban" data-fp="${fp}" title="Ban">⊘</button>
+      ` : ""}
+      ${state.myRole === "admin" && !isAdmin ? `
+        <button class="btn-secondary mod-promote" data-fp="${fp}"
+          data-role="${isMod ? "member" : "mod"}"
+          title="${isMod ? "Remove mod" : "Make mod"}">
+          ${isMod ? "★−" : "★+"}
+        </button>
+      ` : ""}`;
     list.appendChild(div);
   });
+  // Wire save nickname
   list.querySelectorAll(".peer-nick-save").forEach(btn => {
     btn.addEventListener("click", () => {
       const fp    = (btn as HTMLElement).dataset.fp!;
       const input = list.querySelector(`input[data-fp="${fp}"]`) as HTMLInputElement;
       if (input) { state.nicknames.set(fp, input.value.trim().slice(0, 32)); renderSidebar(); }
     });
+  });
+  // Wire moderation buttons
+  list.querySelectorAll(".mod-kick").forEach(btn => {
+    btn.addEventListener("click", () => sendKick((btn as HTMLElement).dataset.fp!));
+  });
+  list.querySelectorAll(".mod-ban").forEach(btn => {
+    btn.addEventListener("click", () => sendBan((btn as HTMLElement).dataset.fp!));
+  });
+  list.querySelectorAll(".mod-promote").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const fp   = (btn as HTMLElement).dataset.fp!;
+      const role = (btn as HTMLElement).dataset.role as "mod" | "member";
+      sendPromote(fp, role);
+    });
+  });
+}
+
+function renderBanList() {
+  const list = document.getElementById("ban-list");
+  if (!list) return;
+  if (state.bans.size === 0) { list.innerHTML = `<p class="settings-hint">No active bans.</p>`; return; }
+  list.innerHTML = "";
+  state.bans.forEach((reason, fp) => {
+    const div = document.createElement("div");
+    div.className = "peer-nick-row";
+    div.innerHTML = `
+      <span class="peer-nick-fp">${fp.slice(0, 16)}</span>
+      <span class="ban-reason">${escapeHtml(reason)}</span>
+      <button class="btn-secondary mod-unban" data-fp="${fp}">Unban</button>`;
+    list.appendChild(div);
+  });
+  list.querySelectorAll(".mod-unban").forEach(btn => {
+    btn.addEventListener("click", () => sendUnban((btn as HTMLElement).dataset.fp!));
   });
 }
 
@@ -596,12 +969,21 @@ async function onSignalingStatus(payload: { connected: boolean; fingerprint?: st
   const cfgStatus = document.getElementById("cfg-status");
   if (payload.connected) {
     if (cfgStatus) { cfgStatus.textContent = "Connected"; cfgStatus.className = "settings-hint ok"; }
+    // Optimistically assume admin until the server sends a role message.
+    // The server will correct this with a "role" message after join.
+    // This ensures controls are visible even with the old server.
+    if (state.myRole === "member" && state.peers.size === 0) {
+      state.myRole  = "admin";
+      state.adminFp = state.fingerprint;
+      renderSidebar();
+    }
     broadcastNickname();
-    // Do NOT call connect_signaling again here — that causes an infinite loop.
-    // All text channels share the single "quipu-main" room connection.
-    // Only voice channels get their own room, handled separately in toggleVoiceChannel.
   } else {
     if (cfgStatus) { cfgStatus.textContent = "Disconnected"; cfgStatus.className = "settings-hint"; }
+    // Reset role on disconnect
+    state.myRole  = "member";
+    state.adminFp = "";
+    state.modFps.clear();
     if (state.activeVoice) leaveVoice();
     state.peers.forEach(p => p.pc?.close());
     state.peers.clear();
@@ -616,6 +998,8 @@ async function onSignalingMessage(msg: any) {
     case "leave":     onPeerLeft(msg.from);   break;
     case "chat":      onChatMessage(msg);      break;
     case "history":   onHistory(msg);          break;
+    case "role":      onRole(msg);             break;
+    case "command":   onCommand(msg);          break;
     case "offer":     onRtcOffer(msg);        break;
     case "answer":    onRtcAnswer(msg);       break;
     case "candidate": onRtcCandidate(msg);    break;
@@ -664,16 +1048,73 @@ function broadcastNickname() {
 
 // ── Peer lifecycle ────────────────────────────────────────────────────────────
 
+function onRole(msg: any) {
+  const p = msg.payload ?? {};
+  state.myRole  = p.role   ?? "member";
+  state.adminFp = p.admin  ?? "";
+  state.modFps  = new Set(p.mods ?? []);
+  state.bans.clear();
+  if (p.bans) Object.entries(p.bans).forEach(([fp, reason]) => state.bans.set(fp, reason as string));
+  // Show/hide ban list section
+  const banSection = document.getElementById("ban-list-section");
+  if (banSection) banSection.style.display = state.myRole !== "member" ? "" : "none";
+  renderSidebar();
+  renderPeerNicknameList();
+  renderBanList();
+}
+
+function onCommand(msg: any) {
+  const p = msg.payload ?? {};
+  switch (p.action) {
+    case "kicked":
+      showOverlay("⚠ You were kicked", `Kicked by ${displayName(p.by ?? "")}.`, false);
+      setConnected(false);
+      if (state.activeVoice) leaveVoice();
+      state.peers.forEach(peer => peer.pc?.close());
+      state.peers.clear();
+      break;
+    case "banned":
+      showOverlay("🚫 You are banned", `Reason: ${p.reason ?? "no reason given"}`, true);
+      setConnected(false);
+      if (state.activeVoice) leaveVoice();
+      state.peers.forEach(peer => peer.pc?.close());
+      state.peers.clear();
+      break;
+    case "move":
+      if (p.channel && state.voiceChannels.includes(p.channel)) {
+        toggleVoiceChannel(p.channel);
+      }
+      break;
+  }
+}
+
+function showOverlay(title: string, body: string, permanent: boolean) {
+  const existing = document.getElementById("mod-overlay");
+  if (existing) existing.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "mod-overlay";
+  overlay.className = "mod-overlay";
+  overlay.innerHTML = `
+    <div class="mod-overlay-box">
+      <h2>${title}</h2>
+      <p>${escapeHtml(body)}</p>
+      ${permanent ? "" : `<button class="btn-primary" id="overlay-dismiss">Dismiss</button>`}
+    </div>`;
+  document.body.appendChild(overlay);
+  if (!permanent) {
+    document.getElementById("overlay-dismiss")?.addEventListener("click", () => overlay.remove());
+  }
+}
+
 function onPeerJoined(fp: string) {
   if (!fp || fp === state.fingerprint) return;
   if (!state.peers.has(fp)) state.peers.set(fp, { fp, pc: null as any, muted: false });
-  // If we're in a voice channel, this join came from the voice room
   if (state.activeVoice) voicePeers.add(fp);
   renderSidebar();
   const st = document.getElementById("text-status");
   if (st) st.textContent = `${state.peers.size} peer(s) connected`;
   if (state.connected && state.myNickname) broadcastNickname();
-  if (state.activeVoice) createOrGetPC(fp, true);
+  if (state.activeVoice) createOrGetPC(fp, false); // tiebreaker decides who initiates
 }
 
 function onPeerLeft(fp: string) {
@@ -717,7 +1158,16 @@ function onChatMessage(msg: any) {
 
 // ── Voice channels ────────────────────────────────────────────────────────────
 
-async function toggleVoiceChannel(ch: string) {  if (!state.connected) { alert("Connect to a server first (Settings)."); return; }
+async function toggleVoiceChannel(ch: string) {
+  // If not connected but server URL is saved, auto-connect
+  if (!state.connected) {
+    if (!state.serverUrl) { alert("Set a server URL in Settings first."); return; }
+    try {
+      await invoke("connect_signaling", { url: state.serverUrl, room: "quipu-main", fingerprint: state.fingerprint });
+      // Give the connection a moment to establish before proceeding
+      await new Promise(r => setTimeout(r, 600));
+    } catch (e: any) { alert(`Could not connect to server: ${e}`); return; }
+  }
   if (state.activeVoice === ch) { leaveVoice(); return; }
   if (state.activeVoice) leaveVoice();
   // Join the voice channel
@@ -729,6 +1179,11 @@ async function toggleVoiceChannel(ch: string) {  if (!state.connected) { alert("
     });
   } catch (e) { alert(`Microphone access denied: ${e}`); return; }
   state.activeVoice = ch;
+  // Populate voicePeers with all currently connected peers
+  voicePeers.clear();
+  state.peers.forEach((_, fp) => voicePeers.add(fp));
+  // Start AFK silence detection
+  startAfkDetection();
   // Show voice status bar at bottom of sidebar
   const voiceStatus = document.getElementById("voice-status")!;
   const voiceLabel  = document.getElementById("voice-status-label")!;
@@ -737,13 +1192,14 @@ async function toggleVoiceChannel(ch: string) {  if (!state.connected) { alert("
   // Announce our nickname to peers immediately
   broadcastNickname();
   // Initiate WebRTC connections to all known peers over the existing signaling connection
-  state.peers.forEach((_, fp) => createOrGetPC(fp, true));
+  state.peers.forEach((_, fp) => createOrGetPC(fp, false)); // tiebreaker decides
   renderSidebar();
 }
 
 function leaveVoice() {
   state.activeVoice = null;
   voicePeers.clear();
+  stopAfkDetection();
   localStream?.getTracks().forEach(t => t.stop());
   localStream = null;
   state.peers.forEach(p => { p.pc?.close(); state.peers.set(p.fp, { ...p, pc: null as any }); });
@@ -755,10 +1211,14 @@ function leaveVoice() {
 
 // ── WebRTC ────────────────────────────────────────────────────────────────────
 
-function createOrGetPC(remoteFp: string, isInitiator: boolean): RTCPeerConnection {
+function createOrGetPC(remoteFp: string, _isInitiator: boolean): RTCPeerConnection {
   const existing = state.peers.get(remoteFp);
   if (existing?.pc && existing.pc.connectionState !== "closed" && existing.pc.connectionState !== "failed") return existing.pc;
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+  // Deterministic tiebreaker: higher fingerprint always initiates the offer.
+  // This prevents glare when both peers try to offer each other simultaneously.
+  const isInitiator = state.fingerprint > remoteFp;
+  const pc = new RTCPeerConnection({ iceServers: getIceServers() });
   localStream?.getTracks().forEach(track => { localStream && pc.addTrack(track, localStream); });
   // Audio output — attach to a hidden container in body
   pc.ontrack = (ev) => {
@@ -767,6 +1227,8 @@ function createOrGetPC(remoteFp: string, isInitiator: boolean): RTCPeerConnectio
     let audio = document.getElementById(`audio-${remoteFp}`) as HTMLAudioElement | null;
     if (!audio) { audio = document.createElement("audio"); audio.id = `audio-${remoteFp}`; audio.autoplay = true; container.appendChild(audio); }
     audio.srcObject = ev.streams[0];
+    // Apply saved volume for this peer
+    setPeerVolume(remoteFp, getPeerVolume(remoteFp));
   };
   pc.onicecandidate = (ev) => {
     if (!ev.candidate) return;
@@ -785,7 +1247,36 @@ function createOrGetPC(remoteFp: string, isInitiator: boolean): RTCPeerConnectio
 
 async function onRtcOffer(msg: any) {
   if (!state.activeVoice || !localStream) return;
-  const pc = createOrGetPC(msg.from, false);
+  // We are always the answerer here — createOrGetPC with false skips offer creation
+  const existing = state.peers.get(msg.from);
+  if (existing?.pc && existing.pc.connectionState !== "closed" && existing.pc.connectionState !== "failed") {
+    // PC exists — just set remote description and answer
+    try {
+      await existing.pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
+      const answer = await existing.pc.createAnswer();
+      await existing.pc.setLocalDescription(answer);
+      await invoke("send_signal", { kind: "answer", to: msg.from, payload: answer, fingerprint: state.fingerprint, room: "quipu-main" });
+    } catch (e) { console.warn("onRtcOffer existing PC failed:", e); }
+    return;
+  }
+  // Create new PC as answerer
+  const pc = new RTCPeerConnection({ iceServers: getIceServers() });
+  localStream?.getTracks().forEach(track => { localStream && pc.addTrack(track, localStream); });
+  pc.ontrack = (ev) => {
+    let container = document.getElementById("audio-container");
+    if (!container) { container = document.createElement("div"); container.id = "audio-container"; document.body.appendChild(container); }
+    let audio = document.getElementById(`audio-${msg.from}`) as HTMLAudioElement | null;
+    if (!audio) { audio = document.createElement("audio"); audio.id = `audio-${msg.from}`; audio.autoplay = true; container.appendChild(audio); }
+    audio.srcObject = ev.streams[0];
+    setPeerVolume(msg.from, getPeerVolume(msg.from));
+  };
+  pc.onicecandidate = (ev) => {
+    if (!ev.candidate) return;
+    invoke("send_signal", { kind: "candidate", to: msg.from, payload: ev.candidate.toJSON(), fingerprint: state.fingerprint, room: "quipu-main" }).catch(console.error);
+  };
+  pc.onconnectionstatechange = () => renderSidebar();
+  state.peers.set(msg.from, { fp: msg.from, pc, muted: false });
+  if (state.activeVoice) voicePeers.add(msg.from);
   await pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);

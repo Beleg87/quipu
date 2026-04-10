@@ -33,15 +33,32 @@ fn load_config(app: tauri::AppHandle) -> Result<Value, String> {
         "server_url": store.get("server_url").unwrap_or(json!("")),
         "room":       store.get("room").unwrap_or(json!("quipu-main")),
         "nickname":   store.get("nickname").unwrap_or(json!("")),
+        "ice_mode":   store.get("ice_mode").unwrap_or(json!("direct")),
+        "turn_url":   store.get("turn_url").unwrap_or(json!("")),
+        "turn_user":  store.get("turn_user").unwrap_or(json!("")),
+        "turn_pass":  store.get("turn_pass").unwrap_or(json!("")),
     }))
 }
 
 #[tauri::command]
-fn save_config(app: tauri::AppHandle, server_url: String, room: String, nickname: String) -> Result<(), String> {
+fn save_config(
+    app:        tauri::AppHandle,
+    server_url: String,
+    room:       String,
+    nickname:   String,
+    ice_mode:   Option<String>,
+    turn_url:   Option<String>,
+    turn_user:  Option<String>,
+    turn_pass:  Option<String>,
+) -> Result<(), String> {
     let store = app.store("quipu.json").map_err(|e| e.to_string())?;
     store.set("server_url", json!(server_url));
-    store.set("room", json!(room));
-    store.set("nickname", json!(nickname));
+    store.set("room",       json!(room));
+    store.set("nickname",   json!(nickname));
+    if let Some(v) = ice_mode  { store.set("ice_mode",  json!(v)); }
+    if let Some(v) = turn_url  { store.set("turn_url",  json!(v)); }
+    if let Some(v) = turn_user { store.set("turn_user", json!(v)); }
+    if let Some(v) = turn_pass { store.set("turn_pass", json!(v)); }
     store.save().map_err(|e| e.to_string())
 }
 
@@ -68,6 +85,45 @@ async fn send_chat(
         "room":    room,
         "from":    fingerprint,
         "payload": { "text": text },
+    })).map_err(|e| e.to_string())?;
+    state.send_raw(msg).await.map_err(|e: anyhow::Error| e.to_string())
+}
+
+#[tauri::command]
+async fn send_moderation(
+    action:      String,  // "kick" | "ban" | "unban" | "promote" | "move"
+    payload:     serde_json::Value,
+    fingerprint: String,
+    room:        String,
+    state:       State<'_, signaling::SignalingHandle>,
+) -> Result<(), String> {
+    let msg_type = match action.as_str() {
+        "kick"    => "kick",
+        "ban"     => "ban",
+        "unban"   => "unban",
+        "promote" => "promote",
+        "move"    => "move",
+        _         => return Err(format!("unknown action: {action}")),
+    };
+    let msg = serde_json::to_string(&json!({
+        "type":    msg_type,
+        "room":    room,
+        "from":    fingerprint,
+        "payload": payload,
+    })).map_err(|e| e.to_string())?;
+    state.send_raw(msg).await.map_err(|e: anyhow::Error| e.to_string())
+}
+
+#[tauri::command]
+async fn send_activity(
+    fingerprint: String,
+    room:        String,
+    state:       State<'_, signaling::SignalingHandle>,
+) -> Result<(), String> {
+    let msg = serde_json::to_string(&json!({
+        "type": "activity",
+        "room": room,
+        "from": fingerprint,
     })).map_err(|e| e.to_string())?;
     state.send_raw(msg).await.map_err(|e: anyhow::Error| e.to_string())
 }
@@ -173,6 +229,8 @@ pub fn run() {
             connect_signaling,
             send_chat,
             send_signal,
+            send_moderation,
+            send_activity,
             check_update,
             install_update,
         ])

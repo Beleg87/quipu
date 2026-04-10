@@ -239,3 +239,94 @@ input  { font: inherit; }
 /* ── Update status ── */
 .update-status { margin-top: 0.5rem; font-size: 0.82rem; }
 .update-notes  { color: var(--muted); font-size: 0.78rem; margin: 0.3rem 0; }
+
+/* ── Connection mode toggle ── */
+.ice-mode-toggle { display: flex; flex-direction: column; gap: 0.5rem; }
+.ice-option {
+  display: flex; align-items: flex-start; gap: 0.75rem;
+  padding: 0.65rem 0.85rem; border: 1px solid var(--border);
+  border-radius: var(--radius); cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.ice-option:hover { background: var(--hover); border-color: var(--accent); }
+.ice-option input[type="radio"] { margin-top: 0.15rem; flex-shrink: 0; accent-color: var(--accent-hi); }
+.ice-option-body { display: flex; flex-direction: column; gap: 0.15rem; }
+.ice-option-title { font-size: 0.85rem; font-weight: 600; color: var(--text); }
+.ice-option-desc  { font-size: 0.75rem; color: var(--muted); line-height: 1.4; }
+.ice-option:has(input:checked) { border-color: var(--accent-hi); background: var(--accent-dim); }
+
+/* ── Code block in settings ── */
+.code-block {
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 0.75rem; font-family: monospace; font-size: 0.75rem;
+  color: var(--text); white-space: pre; overflow-x: auto; margin-top: 0.5rem;
+  line-height: 1.6;
+}
+
+/* ── Voice peer volume sliders ── */
+.voice-peer-item {
+  display: flex; align-items: center; gap: 0.4rem;
+  padding: 0.2rem 0; flex-wrap: nowrap;
+}
+.voice-peer-name { font-size: 0.78rem; color: var(--muted); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voice-peer-you  { font-size: 0.68rem; color: var(--muted); font-style: italic; flex-shrink: 0; }
+.peer-volume {
+  width: 60px; flex-shrink: 0;
+  accent-color: var(--accent-hi);
+  cursor: pointer; height: 3px;
+  -webkit-appearance: none; appearance: none;
+  background: var(--border); border-radius: 2px; outline: none;
+}
+.peer-volume::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--accent-hi); cursor: pointer;
+}
+.peer-volume:hover { background: var(--accent-dim); }
+
+/* ── Role badges ── */
+.role-badge {
+  font-size: 0.65rem; margin-right: 0.2rem;
+  display: inline-block; line-height: 1;
+}
+.role-badge.admin { color: #f6c90e; }
+.role-badge.mod   { color: var(--accent-hi); }
+
+/* ── Drag and drop ── */
+.drag-handle {
+  font-size: 0.7rem; color: var(--muted); cursor: grab;
+  flex-shrink: 0; padding: 0 0.1rem; user-select: none;
+}
+.drag-handle:active { cursor: grabbing; }
+.dragging { opacity: 0.4; }
+.ch-item.drag-over {
+  background: var(--accent-dim);
+  border: 1px dashed var(--accent-hi);
+  border-radius: var(--radius);
+}
+
+/* ── Mod overlay ── */
+.mod-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.mod-overlay-box {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 2rem 2.5rem;
+  text-align: center; max-width: 340px;
+}
+.mod-overlay-box h2 { font-size: 1.1rem; margin-bottom: 0.75rem; }
+.mod-overlay-box p  { color: var(--muted); font-size: 0.85rem; margin-bottom: 1rem; }
+
+/* ── Moderation buttons in peer list ── */
+.mod-kick { color: var(--muted); font-size: 0.78rem; padding: 0.25rem 0.45rem; }
+.mod-ban  { font-size: 0.78rem; padding: 0.25rem 0.45rem; }
+.mod-promote { font-size: 0.78rem; padding: 0.25rem 0.45rem; }
+
+/* ── Ban list ── */
+.ban-reason {
+  flex: 1; font-size: 0.78rem; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mod-unban { font-size: 0.75rem; padding: 0.25rem 0.5rem; flex-shrink: 0; }
