@@ -5,14 +5,19 @@ import (
 	"flag"
 	"net/http"
 	"os"
+	"os/exec"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"github.com/quipu-app/quipu/signaling/internal/sfu"
+	"github.com/quipu-app/quipu/signaling/internal/updater"
 	"go.uber.org/zap"
 )
+
+// Version is set at build time via -ldflags. Falls back to "dev".
+var Version = "dev"
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -851,10 +856,38 @@ func main() {
 	}
 	defer log.Sync()
 
+	log.Info("quipu signaling server", zap.String("version", Version))
+
+	// ── Clean up any .old binary left from a previous Windows update ──────────
+	updater.CleanupOldBinary(log)
+
+	// ── Self-update check ─────────────────────────────────────────────────────
+	// Skip update check if running as "dev" build or if QUIPU_NO_UPDATE is set.
+	if Version != "dev" && os.Getenv("QUIPU_NO_UPDATE") == "" {
+		if shouldRestart := updater.CheckAndUpdate(Version, log); shouldRestart {
+			log.Info("restarting with updated binary...")
+			log.Sync()
+			// Re-exec self — the new binary is already in place
+			exe, err := os.Executable()
+			if err != nil {
+				log.Error("could not determine executable path for restart", zap.Error(err))
+			} else {
+				cmd := exec.Command(exe, os.Args[1:]...)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				cmd.Stdin  = os.Stdin
+				if err := cmd.Start(); err != nil {
+					log.Error("restart failed", zap.Error(err))
+				} else {
+					os.Exit(0) // old process exits cleanly
+				}
+			}
+		}
+	}
+
+	// ── Server ────────────────────────────────────────────────────────────────
 	store := loadDataStore(cfg.DataFile, log)
 
-	// SFU signal function — sends JSON to a specific peer over their WS connection.
-	// We use a closure that gets the hub after construction.
 	var hub *Hub
 	sfuSignal := func(fp string, m map[string]any) error {
 		if hub == nil {
@@ -864,7 +897,6 @@ func main() {
 		if err != nil {
 			return err
 		}
-		// Find the peer across all rooms and send
 		hub.mu.RLock()
 		for _, room := range hub.rooms {
 			room.mu.RLock()
@@ -889,7 +921,8 @@ func main() {
 
 	log.Info("quipu server starting",
 		zap.String("addr", cfg.Addr),
-		zap.String("data", cfg.DataFile))
+		zap.String("data", cfg.DataFile),
+		zap.String("version", Version))
 
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		err = http.ListenAndServeTLS(cfg.Addr, cfg.TLSCert, cfg.TLSKey, mux)
