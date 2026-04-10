@@ -1002,7 +1002,10 @@ async function onSignalingMessage(msg: any) {
     case "command":   onCommand(msg);          break;
     case "offer":     onRtcOffer(msg);        break;
     case "answer":    onRtcAnswer(msg);       break;
-    case "candidate": onRtcCandidate(msg);    break;
+    case "candidate":  onRtcCandidate(msg);     break;
+    // SFU messages come back from server as JSON objects in the WS stream
+    case "sfu-offer":
+    case "sfu-ice":    handleSFUMessage(msg);   break;
   }
 }
 
@@ -1158,19 +1161,24 @@ function onChatMessage(msg: any) {
 
 // ── Voice channels ────────────────────────────────────────────────────────────
 
+
+// ── Voice connection ──────────────────────────────────────────────────────────
+
+let voiceMode: "sfu" | "p2p" = "sfu";
+let sfuPc: RTCPeerConnection | null = null;
+
 async function toggleVoiceChannel(ch: string) {
-  // If not connected but server URL is saved, auto-connect
+  // Auto-connect to signaling if needed
   if (!state.connected) {
     if (!state.serverUrl) { alert("Set a server URL in Settings first."); return; }
     try {
       await invoke("connect_signaling", { url: state.serverUrl, room: "quipu-main", fingerprint: state.fingerprint });
-      // Give the connection a moment to establish before proceeding
       await new Promise(r => setTimeout(r, 600));
-    } catch (e: any) { alert(`Could not connect to server: ${e}`); return; }
+    } catch (e: any) { alert(`Could not connect: ${e}`); return; }
   }
   if (state.activeVoice === ch) { leaveVoice(); return; }
   if (state.activeVoice) leaveVoice();
-  // Join the voice channel
+
   const sel = document.getElementById("mic-select") as HTMLSelectElement | null;
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
@@ -1178,30 +1186,149 @@ async function toggleVoiceChannel(ch: string) {
       video: false,
     });
   } catch (e) { alert(`Microphone access denied: ${e}`); return; }
+
   state.activeVoice = ch;
-  // Populate voicePeers with all currently connected peers
   voicePeers.clear();
   state.peers.forEach((_, fp) => voicePeers.add(fp));
-  // Start AFK silence detection
   startAfkDetection();
-  // Show voice status bar at bottom of sidebar
+
   const voiceStatus = document.getElementById("voice-status")!;
   const voiceLabel  = document.getElementById("voice-status-label")!;
   voiceStatus.style.display = "flex";
-  voiceLabel.textContent    = `🔊 ${ch}`;
-  // Announce our nickname to peers immediately
+
+  // Try SFU first — 5 second timeout, then fall back to P2P
+  const sfuOk = await trySFU(ch);
+  if (sfuOk) {
+    voiceMode = "sfu";
+    voiceLabel.textContent = `\uD83D\uDD0A ${ch} \u00B7 SFU`;
+    broadcastNickname();
+    renderSidebar();
+    return;
+  }
+
+  // SFU failed — fall back to P2P mesh
+  voiceMode = "p2p";
+  voiceLabel.textContent = `\uD83D\uDD0A ${ch} \u00B7 P2P`;
   broadcastNickname();
-  // Initiate WebRTC connections to all known peers over the existing signaling connection
-  state.peers.forEach((_, fp) => createOrGetPC(fp, false)); // tiebreaker decides
+  state.peers.forEach((_, fp) => createOrGetPC(fp, false));
   renderSidebar();
 }
 
+function trySFU(channel: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { resolve(false); }, 5000);
+
+    const pc = new RTCPeerConnection({ iceServers: getIceServers() });
+    sfuPc = pc;
+
+    localStream?.getTracks().forEach(track => { localStream && pc.addTrack(track, localStream); });
+
+    pc.ontrack = (ev) => {
+      let container = document.getElementById("audio-container");
+      if (!container) { container = document.createElement("div"); container.id = "audio-container"; document.body.appendChild(container); }
+      const sid = ev.streams[0]?.id || "sfu";
+      let audio = document.getElementById(`audio-sfu-${sid}`) as HTMLAudioElement | null;
+      if (!audio) { audio = document.createElement("audio"); audio.id = `audio-sfu-${sid}`; audio.autoplay = true; container.appendChild(audio); }
+      audio.srcObject = ev.streams[0];
+    };
+
+    pc.onicecandidate = (ev) => {
+      if (!ev.candidate) return;
+      const ci = ev.candidate.toJSON();
+      invoke("send_sfu", {
+        action: "sfu-ice",
+        payload: { channel, candidate: ci.candidate, sdpMid: ci.sdpMid, sdpMLineIndex: ci.sdpMLineIndex },
+        fingerprint: state.fingerprint,
+      }).catch(() => {});
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "connected") {
+        clearTimeout(timer);
+        resolve(true);
+      } else if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+        clearTimeout(timer);
+        pc.close();
+        sfuPc = null;
+        resolve(false);
+      }
+    };
+
+    // Ask server to join SFU room — server responds with sfu-offer over WS
+    invoke("send_sfu", {
+      action: "sfu-join",
+      payload: { channel },
+      fingerprint: state.fingerprint,
+    }).catch(() => { clearTimeout(timer); resolve(false); });
+  });
+}
+
+async function handleSFUMessage(msg: any) {
+  switch (msg.type) {
+    case "sfu-offer": {
+      if (!sfuPc) return;
+      // Server sends offer as: { type:"sfu-offer", sdp: "<json string>" }
+      // or nested in payload. Parse defensively.
+      let offerObj: RTCSessionDescriptionInit;
+      try {
+        const raw = msg.sdp ?? (typeof msg.payload === "string" ? msg.payload : JSON.stringify(msg.payload));
+        offerObj = typeof raw === "string" ? JSON.parse(raw) : raw;
+      } catch { return; }
+
+      try {
+        // Handle renegotiation: if we already have a local description, rollback first
+        if (sfuPc.signalingState !== "stable") {
+          await Promise.all([
+            sfuPc.setLocalDescription({ type: "rollback" }),
+            sfuPc.setRemoteDescription(new RTCSessionDescription(offerObj)),
+          ]);
+        } else {
+          await sfuPc.setRemoteDescription(new RTCSessionDescription(offerObj));
+        }
+        const answer = await sfuPc.createAnswer();
+        await sfuPc.setLocalDescription(answer);
+        invoke("send_sfu", {
+          action: "sfu-answer",
+          payload: { channel: state.activeVoice, sdp: JSON.stringify(answer) },
+          fingerprint: state.fingerprint,
+        }).catch(() => {});
+      } catch (e) { console.warn("SFU offer handling failed:", e); }
+      break;
+    }
+    case "sfu-ice": {
+      if (!sfuPc) return;
+      // Candidate may be at top level or nested in payload
+      const p = msg.payload ?? msg;
+      try {
+        await sfuPc.addIceCandidate(new RTCIceCandidate({
+          candidate:     p.candidate ?? msg.candidate,
+          sdpMid:        p.sdpMid    ?? msg.sdpMid,
+          sdpMLineIndex: p.sdpMLineIndex ?? msg.sdpMLineIndex,
+        }));
+      } catch {}
+      break;
+    }
+  }
+}
+
 function leaveVoice() {
+  const ch = state.activeVoice;
   state.activeVoice = null;
   voicePeers.clear();
   stopAfkDetection();
   localStream?.getTracks().forEach(t => t.stop());
   localStream = null;
+  if (sfuPc) {
+    if (ch) {
+      invoke("send_sfu", {
+        action: "sfu-leave",
+        payload: { channel: ch },
+        fingerprint: state.fingerprint,
+      }).catch(() => {});
+    }
+    sfuPc.close();
+    sfuPc = null;
+  }
   state.peers.forEach(p => { p.pc?.close(); state.peers.set(p.fp, { ...p, pc: null as any }); });
   document.getElementById("audio-container")?.remove();
   const voiceStatus = document.getElementById("voice-status");
@@ -1209,25 +1336,20 @@ function leaveVoice() {
   renderSidebar();
 }
 
-// ── WebRTC ────────────────────────────────────────────────────────────────────
+// ── P2P WebRTC (fallback) ─────────────────────────────────────────────────────
 
 function createOrGetPC(remoteFp: string, _isInitiator: boolean): RTCPeerConnection {
   const existing = state.peers.get(remoteFp);
   if (existing?.pc && existing.pc.connectionState !== "closed" && existing.pc.connectionState !== "failed") return existing.pc;
-
-  // Deterministic tiebreaker: higher fingerprint always initiates the offer.
-  // This prevents glare when both peers try to offer each other simultaneously.
   const isInitiator = state.fingerprint > remoteFp;
   const pc = new RTCPeerConnection({ iceServers: getIceServers() });
   localStream?.getTracks().forEach(track => { localStream && pc.addTrack(track, localStream); });
-  // Audio output — attach to a hidden container in body
   pc.ontrack = (ev) => {
     let container = document.getElementById("audio-container");
     if (!container) { container = document.createElement("div"); container.id = "audio-container"; document.body.appendChild(container); }
     let audio = document.getElementById(`audio-${remoteFp}`) as HTMLAudioElement | null;
     if (!audio) { audio = document.createElement("audio"); audio.id = `audio-${remoteFp}`; audio.autoplay = true; container.appendChild(audio); }
     audio.srcObject = ev.streams[0];
-    // Apply saved volume for this peer
     setPeerVolume(remoteFp, getPeerVolume(remoteFp));
   };
   pc.onicecandidate = (ev) => {
@@ -1246,11 +1368,10 @@ function createOrGetPC(remoteFp: string, _isInitiator: boolean): RTCPeerConnecti
 }
 
 async function onRtcOffer(msg: any) {
-  if (!state.activeVoice || !localStream) return;
-  // We are always the answerer here — createOrGetPC with false skips offer creation
+  // Only process P2P offers when in P2P fallback mode
+  if (!state.activeVoice || !localStream || voiceMode === "sfu") return;
   const existing = state.peers.get(msg.from);
   if (existing?.pc && existing.pc.connectionState !== "closed" && existing.pc.connectionState !== "failed") {
-    // PC exists — just set remote description and answer
     try {
       await existing.pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
       const answer = await existing.pc.createAnswer();
@@ -1259,7 +1380,6 @@ async function onRtcOffer(msg: any) {
     } catch (e) { console.warn("onRtcOffer existing PC failed:", e); }
     return;
   }
-  // Create new PC as answerer
   const pc = new RTCPeerConnection({ iceServers: getIceServers() });
   localStream?.getTracks().forEach(track => { localStream && pc.addTrack(track, localStream); });
   pc.ontrack = (ev) => {

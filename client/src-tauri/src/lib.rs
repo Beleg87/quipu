@@ -115,6 +115,21 @@ async fn send_moderation(
 }
 
 #[tauri::command]
+async fn send_sfu(
+    action:      String,  // "sfu-join" | "sfu-answer" | "sfu-ice" | "sfu-leave"
+    payload:     serde_json::Value,
+    fingerprint: String,
+    state:       State<'_, signaling::SignalingHandle>,
+) -> Result<(), String> {
+    let msg = serde_json::to_string(&json!({
+        "type":    action,
+        "from":    fingerprint,
+        "payload": payload,
+    })).map_err(|e| e.to_string())?;
+    state.send_raw(msg).await.map_err(|e: anyhow::Error| e.to_string())
+}
+
+#[tauri::command]
 async fn send_activity(
     fingerprint: String,
     room:        String,
@@ -231,6 +246,7 @@ pub fn run() {
             send_signal,
             send_moderation,
             send_activity,
+            send_sfu,
             check_update,
             install_update,
         ])

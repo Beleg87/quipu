@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/webrtc/v4"
+	"github.com/quipu-app/quipu/signaling/internal/sfu"
 	"go.uber.org/zap"
 )
 
@@ -18,18 +20,18 @@ type Config struct {
 	Addr     string
 	TLSCert  string
 	TLSKey   string
-	BansFile string
-	AdminFp  string // permanent admin fingerprint; overrides first-to-join
+	DataFile string
+	AdminFp  string
 }
 
 func configFromFlags() Config {
-	addr  := flag.String("addr",      ":8080",     "listen address")
-	cert  := flag.String("tls-cert",  "",          "TLS certificate path (optional)")
-	key   := flag.String("tls-key",   "",          "TLS key path (optional)")
-	bans  := flag.String("bans-file", "quipu-data.json", "persistent data file (bans + mods)")
-	admin := flag.String("admin",     "",          "permanent admin fingerprint (your fingerprint from Settings)")
+	addr  := flag.String("addr",      ":8080",           "listen address")
+	cert  := flag.String("tls-cert",  "",                "TLS certificate path (optional)")
+	key   := flag.String("tls-key",   "",                "TLS key path (optional)")
+	data  := flag.String("data-file", "quipu-data.json", "persistent data file (bans + mods)")
+	admin := flag.String("admin",     "",                "permanent admin fingerprint")
 	flag.Parse()
-	return Config{Addr: *addr, TLSCert: *cert, TLSKey: *key, BansFile: *bans, AdminFp: *admin}
+	return Config{Addr: *addr, TLSCert: *cert, TLSKey: *key, DataFile: *data, AdminFp: *admin}
 }
 
 // ── Message types ─────────────────────────────────────────────────────────────
@@ -37,6 +39,7 @@ func configFromFlags() Config {
 type MessageType string
 
 const (
+	// Existing signaling
 	MsgOffer     MessageType = "offer"
 	MsgAnswer    MessageType = "answer"
 	MsgCandidate MessageType = "candidate"
@@ -44,17 +47,24 @@ const (
 	MsgLeave     MessageType = "leave"
 	MsgChat      MessageType = "chat"
 	MsgHistory   MessageType = "history"
-	MsgRole      MessageType = "role"     // server → client: role assignment/change
-	MsgPromote   MessageType = "promote"  // admin → server: promote/demote a peer
-	MsgKick      MessageType = "kick"     // admin/mod → server: remove peer from room
-	MsgBan       MessageType = "ban"      // admin/mod → server: ban peer fingerprint
-	MsgUnban     MessageType = "unban"    // admin/mod → server: remove ban
-	MsgMove      MessageType = "move"     // admin/mod → server: move peer to voice channel
-	MsgCommand   MessageType = "command"  // server → specific client: execute action
-	MsgActivity  MessageType = "activity" // client → server: voice activity heartbeat
+	MsgRole      MessageType = "role"
+	MsgPromote   MessageType = "promote"
+	MsgKick      MessageType = "kick"
+	MsgBan       MessageType = "ban"
+	MsgUnban     MessageType = "unban"
+	MsgMove      MessageType = "move"
+	MsgCommand   MessageType = "command"
+	MsgActivity  MessageType = "activity"
 	MsgPing      MessageType = "ping"
 	MsgPong      MessageType = "pong"
 	MsgError     MessageType = "error"
+
+	// SFU signaling (server ↔ client)
+	MsgSFUJoin      MessageType = "sfu-join"      // client → server: join SFU room
+	MsgSFUOffer     MessageType = "sfu-offer"     // server → client: SFU offer
+	MsgSFUAnswer    MessageType = "sfu-answer"    // client → server: SFU answer
+	MsgSFUICE       MessageType = "sfu-ice"       // bidirectional: ICE candidates
+	MsgSFULeave     MessageType = "sfu-leave"     // client → server: leave SFU room
 )
 
 type Message struct {
@@ -71,32 +81,131 @@ type StoredMessage struct {
 	At      int64           `json:"at"`
 }
 
-// ── Peer ──────────────────────────────────────────────────────────────────────
+// ── Persistent data store ─────────────────────────────────────────────────────
+
+type persistedData struct {
+	Bans map[string]string          `json:"bans"`
+	Mods map[string]map[string]bool `json:"mods"`
+}
+
+type DataStore struct {
+	mu       sync.RWMutex
+	data     persistedData
+	filePath string
+	log      *zap.Logger
+}
+
+func loadDataStore(path string, log *zap.Logger) *DataStore {
+	ds := &DataStore{
+		data:     persistedData{Bans: make(map[string]string), Mods: make(map[string]map[string]bool)},
+		filePath: path,
+		log:      log,
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ds
+	}
+	if err := json.Unmarshal(raw, &ds.data); err != nil {
+		log.Warn("failed to parse data file, starting fresh", zap.Error(err))
+		return ds
+	}
+	if ds.data.Bans == nil {
+		ds.data.Bans = make(map[string]string)
+	}
+	if ds.data.Mods == nil {
+		ds.data.Mods = make(map[string]map[string]bool)
+	}
+	log.Info("loaded persistent data",
+		zap.Int("bans", len(ds.data.Bans)),
+		zap.Int("mod_rooms", len(ds.data.Mods)))
+	return ds
+}
+
+func (ds *DataStore) save() {
+	ds.mu.RLock()
+	raw, _ := json.MarshalIndent(ds.data, "", "  ")
+	ds.mu.RUnlock()
+	if err := os.WriteFile(ds.filePath, raw, 0644); err != nil {
+		ds.log.Warn("failed to save data", zap.Error(err))
+	}
+}
+
+func (ds *DataStore) isBanned(fp string) (bool, string) {
+	ds.mu.RLock(); defer ds.mu.RUnlock()
+	r, ok := ds.data.Bans[fp]
+	return ok, r
+}
+
+func (ds *DataStore) ban(fp, reason string) {
+	ds.mu.Lock(); ds.data.Bans[fp] = reason; ds.mu.Unlock()
+	ds.save()
+}
+
+func (ds *DataStore) unban(fp string) bool {
+	ds.mu.Lock()
+	_, existed := ds.data.Bans[fp]
+	delete(ds.data.Bans, fp)
+	ds.mu.Unlock()
+	if existed {
+		ds.save()
+	}
+	return existed
+}
+
+func (ds *DataStore) listBans() map[string]string {
+	ds.mu.RLock(); defer ds.mu.RUnlock()
+	out := make(map[string]string, len(ds.data.Bans))
+	for k, v := range ds.data.Bans {
+		out[k] = v
+	}
+	return out
+}
+
+func (ds *DataStore) getMods(room string) map[string]bool {
+	ds.mu.RLock(); defer ds.mu.RUnlock()
+	m := ds.data.Mods[room]
+	out := make(map[string]bool, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func (ds *DataStore) setMod(room, fp string, isMod bool) {
+	ds.mu.Lock()
+	if ds.data.Mods[room] == nil {
+		ds.data.Mods[room] = make(map[string]bool)
+	}
+	if isMod {
+		ds.data.Mods[room][fp] = true
+	} else {
+		delete(ds.data.Mods[room], fp)
+	}
+	ds.mu.Unlock()
+	ds.save()
+}
+
+// ── WS peer & room ────────────────────────────────────────────────────────────
 
 type Peer struct {
 	fingerprint  string
-	conn         *websocket.Conn
+	conn         *threadSafeWriter
 	send         chan []byte
 	room         string
 	joinedAt     time.Time
-	lastActivity time.Time // updated on any message; used for AFK detection
+	lastActivity time.Time
 }
-
-// ── Room ──────────────────────────────────────────────────────────────────────
 
 type Room struct {
 	mu      sync.RWMutex
 	peers   map[string]*Peer
 	history []StoredMessage
-	admin   string          // fingerprint of room admin (first to join)
-	mods    map[string]bool // fingerprints with mod privileges
+	admin   string
+	mods    map[string]bool
 }
 
 func newRoom() *Room {
-	return &Room{
-		peers: make(map[string]*Peer),
-		mods:  make(map[string]bool),
-	}
+	return &Room{peers: make(map[string]*Peer), mods: make(map[string]bool)}
 }
 
 func (r *Room) isPrivileged(fp string) bool {
@@ -106,26 +215,36 @@ func (r *Room) isPrivileged(fp string) bool {
 
 func (r *Room) role(fp string) string {
 	r.mu.RLock(); defer r.mu.RUnlock()
-	if fp == r.admin   { return "admin" }
-	if r.mods[fp]      { return "mod"   }
+	if fp == r.admin {
+		return "admin"
+	}
+	if r.mods[fp] {
+		return "mod"
+	}
 	return "member"
 }
 
 func (r *Room) add(p *Peer) {
 	r.mu.Lock(); defer r.mu.Unlock()
+	if len(r.peers) == 0 {
+		r.admin = p.fingerprint
+	}
 	r.peers[p.fingerprint] = p
 }
 
-func (r *Room) remove(fingerprint string) {
+func (r *Room) remove(fp string) {
 	r.mu.Lock(); defer r.mu.Unlock()
-	delete(r.peers, fingerprint)
+	delete(r.peers, fp)
 }
 
 func (r *Room) broadcast(data []byte, except string) {
 	r.mu.RLock(); defer r.mu.RUnlock()
 	for fp, p := range r.peers {
 		if fp != except {
-			select { case p.send <- data: default: }
+			select {
+			case p.send <- data:
+			default:
+			}
 		}
 	}
 }
@@ -133,8 +252,13 @@ func (r *Room) broadcast(data []byte, except string) {
 func (r *Room) unicast(data []byte, to string) bool {
 	r.mu.RLock(); defer r.mu.RUnlock()
 	p, ok := r.peers[to]
-	if !ok { return false }
-	select { case p.send <- data: default: }
+	if !ok {
+		return false
+	}
+	select {
+	case p.send <- data:
+	default:
+	}
 	return true
 }
 
@@ -158,123 +282,34 @@ func (r *Room) getHistory() []StoredMessage {
 	return out
 }
 
-// ── Persistent data store ─────────────────────────────────────────────────────
-// Stores bans and per-room mod lists across server restarts.
-
-type persistedData struct {
-	Bans map[string]string            `json:"bans"` // fp → reason
-	Mods map[string]map[string]bool   `json:"mods"` // room → set of mod fps
-}
-
-type DataStore struct {
-	mu       sync.RWMutex
-	data     persistedData
-	filePath string
-	log      *zap.Logger
-}
-
-func loadDataStore(path string, log *zap.Logger) *DataStore {
-	ds := &DataStore{
-		data:     persistedData{Bans: make(map[string]string), Mods: make(map[string]map[string]bool)},
-		filePath: path,
-		log:      log,
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil { return ds } // first run — no file yet
-	if err := json.Unmarshal(raw, &ds.data); err != nil {
-		log.Warn("failed to parse data file, starting fresh", zap.Error(err)); return ds
-	}
-	if ds.data.Bans == nil { ds.data.Bans = make(map[string]string) }
-	if ds.data.Mods == nil { ds.data.Mods = make(map[string]map[string]bool) }
-	log.Info("loaded persistent data",
-		zap.Int("bans", len(ds.data.Bans)),
-		zap.Int("mod_rooms", len(ds.data.Mods)))
-	return ds
-}
-
-func (ds *DataStore) save() {
-	ds.mu.RLock()
-	raw, _ := json.MarshalIndent(ds.data, "", "  ")
-	ds.mu.RUnlock()
-	if err := os.WriteFile(ds.filePath, raw, 0644); err != nil {
-		ds.log.Warn("failed to save data", zap.Error(err))
-	}
-}
-
-// ── Ban helpers ───────────────────────────────────────────────────────────────
-
-func (ds *DataStore) isBanned(fp string) (bool, string) {
-	ds.mu.RLock(); defer ds.mu.RUnlock()
-	reason, ok := ds.data.Bans[fp]
-	return ok, reason
-}
-
-func (ds *DataStore) ban(fp, reason string) {
-	ds.mu.Lock(); ds.data.Bans[fp] = reason; ds.mu.Unlock()
-	ds.save()
-}
-
-func (ds *DataStore) unban(fp string) bool {
-	ds.mu.Lock()
-	_, existed := ds.data.Bans[fp]
-	delete(ds.data.Bans, fp)
-	ds.mu.Unlock()
-	if existed { ds.save() }
-	return existed
-}
-
-func (ds *DataStore) listBans() map[string]string {
-	ds.mu.RLock(); defer ds.mu.RUnlock()
-	out := make(map[string]string, len(ds.data.Bans))
-	for k, v := range ds.data.Bans { out[k] = v }
-	return out
-}
-
-// ── Mod helpers ───────────────────────────────────────────────────────────────
-
-func (ds *DataStore) getMods(room string) map[string]bool {
-	ds.mu.RLock(); defer ds.mu.RUnlock()
-	m := ds.data.Mods[room]
-	out := make(map[string]bool, len(m))
-	for k, v := range m { out[k] = v }
-	return out
-}
-
-func (ds *DataStore) setMod(room, fp string, isMod bool) {
-	ds.mu.Lock()
-	if ds.data.Mods[room] == nil { ds.data.Mods[room] = make(map[string]bool) }
-	if isMod {
-		ds.data.Mods[room][fp] = true
-	} else {
-		delete(ds.data.Mods[room], fp)
-	}
-	ds.mu.Unlock()
-	ds.save()
-}
-
-func (ds *DataStore) isMod(room, fp string) bool {
-	ds.mu.RLock(); defer ds.mu.RUnlock()
-	return ds.data.Mods[room][fp]
-}
-
 // ── Hub ───────────────────────────────────────────────────────────────────────
 
 type Hub struct {
 	mu      sync.RWMutex
 	rooms   map[string]*Room
+	sfuMgr  *sfu.Manager
 	store   *DataStore
-	adminFp string // permanent admin fingerprint, empty = first-to-join
+	adminFp string
 	log     *zap.Logger
 }
 
-func newHub(store *DataStore, adminFp string, log *zap.Logger) *Hub {
-	return &Hub{rooms: make(map[string]*Room), store: store, adminFp: adminFp, log: log}
+func newHub(store *DataStore, sfuMgr *sfu.Manager, adminFp string, log *zap.Logger) *Hub {
+	return &Hub{
+		rooms:   make(map[string]*Room),
+		sfuMgr:  sfuMgr,
+		store:   store,
+		adminFp: adminFp,
+		log:     log,
+	}
 }
 
 func (h *Hub) room(name string) *Room {
 	h.mu.Lock(); defer h.mu.Unlock()
 	r, ok := h.rooms[name]
-	if !ok { r = newRoom(); h.rooms[name] = r }
+	if !ok {
+		r = newRoom()
+		h.rooms[name] = r
+	}
 	return r
 }
 
@@ -285,13 +320,14 @@ func (h *Hub) gc(name string) {
 	}
 }
 
-// sendRole sends a role assignment to a specific peer
 func (h *Hub) sendRole(room *Room, fp string) {
 	role := room.role(fp)
 	admin := room.admin
-	mods  := []string{}
+	mods := []string{}
 	room.mu.RLock()
-	for m := range room.mods { mods = append(mods, m) }
+	for m := range room.mods {
+		mods = append(mods, m)
+	}
 	room.mu.RUnlock()
 	payload, _ := json.Marshal(map[string]any{
 		"role":  role,
@@ -299,20 +335,22 @@ func (h *Hub) sendRole(room *Room, fp string) {
 		"mods":  mods,
 		"bans":  h.store.listBans(),
 	})
-	msg, _ := json.Marshal(Message{Type: MsgRole, From: fp, Payload: payload})
+	msg, _ := json.Marshal(Message{Type: MsgRole, Payload: payload})
 	room.unicast(msg, fp)
 }
 
-// broadcastRoles sends updated role info to all peers in the room
 func (h *Hub) broadcastRoles(room *Room) {
 	admin := room.admin
-	mods  := []string{}
+	mods := []string{}
 	room.mu.RLock()
-	for m := range room.mods { mods = append(mods, m) }
+	for m := range room.mods {
+		mods = append(mods, m)
+	}
 	peers := make([]string, 0, len(room.peers))
-	for fp := range room.peers { peers = append(peers, fp) }
+	for fp := range room.peers {
+		peers = append(peers, fp)
+	}
 	room.mu.RUnlock()
-
 	for _, fp := range peers {
 		role := room.role(fp)
 		payload, _ := json.Marshal(map[string]any{
@@ -339,18 +377,17 @@ const (
 	pingPeriod     = 50 * time.Second
 	maxMessageSize = 64 * 1024
 	afkTimeout     = 10 * time.Minute
-	afkCheckPeriod = 1  * time.Minute
+	afkCheckPeriod = 1 * time.Minute
 )
 
 func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil { h.log.Warn("upgrade failed", zap.Error(err)); return }
-	peer := &Peer{
-		conn:         conn,
-		send:         make(chan []byte, 64),
-		joinedAt:     time.Now(),
-		lastActivity: time.Now(),
+	if err != nil {
+		h.log.Warn("upgrade failed", zap.Error(err))
+		return
 	}
+	safe := &threadSafeWriter{conn, sync.Mutex{}}
+	peer := &Peer{conn: safe, send: make(chan []byte, 64), joinedAt: time.Now(), lastActivity: time.Now()}
 	go peer.writePump(h.log)
 	peer.readPump(h)
 }
@@ -358,10 +395,14 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 func (p *Peer) readPump(h *Hub) {
 	defer func() {
 		p.conn.Close()
-		if p.room == "" { return }
+		if p.room == "" {
+			return
+		}
 		room := h.room(p.room)
 		room.remove(p.fingerprint)
 		h.gc(p.room)
+		// Leave SFU if in one
+		h.sfuMgr.LeaveAll(p.fingerprint)
 		leave, _ := json.Marshal(Message{Type: MsgLeave, Room: p.room, From: p.fingerprint})
 		room.broadcast(leave, p.fingerprint)
 		h.log.Info("peer left", zap.String("fp", p.fingerprint), zap.String("room", p.room))
@@ -385,7 +426,8 @@ func (p *Peer) readPump(h *Hub) {
 
 		var msg Message
 		if err := json.Unmarshal(raw, &msg); err != nil {
-			h.log.Warn("bad json", zap.Error(err)); continue
+			h.log.Warn("bad json", zap.Error(err))
+			continue
 		}
 
 		switch msg.Type {
@@ -395,29 +437,120 @@ func (p *Peer) readPump(h *Hub) {
 			p.send <- pong
 
 		case MsgActivity:
-			// Voice activity heartbeat — just update lastActivity (already done above)
+			// Voice activity heartbeat — lastActivity already updated above
+
+		// ── SFU messages ──────────────────────────────────────────────────────
+
+		case MsgSFUJoin:
+			// Payload: {"channel": "Main"}
+			var payload struct {
+				Channel string `json:"channel"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil || payload.Channel == "" {
+				p.send <- errMsg("sfu-join: channel required")
+				continue
+			}
+			sfuRoom := h.sfuMgr.GetOrCreate(payload.Channel)
+
+			// Signal function: sends SFU messages back over this WS connection
+			signalFn := func(fp string, m map[string]any) error {
+				data, err := json.Marshal(m)
+				if err != nil {
+					return err
+				}
+				p.send <- data
+				return nil
+			}
+
+			offer, err := sfuRoom.Join(p.fingerprint, signalFn)
+			if err != nil {
+				h.log.Error("SFU join failed", zap.Error(err))
+				p.send <- errMsg("sfu join failed: " + err.Error())
+				continue
+			}
+			offerJSON, _ := json.Marshal(offer)
+			resp, _ := json.Marshal(map[string]any{
+				"type": "sfu-offer",
+				"sdp":  string(offerJSON),
+			})
+			p.send <- resp
+			h.log.Info("SFU joined", zap.String("fp", p.fingerprint), zap.String("channel", payload.Channel))
+
+		case MsgSFUAnswer:
+			// Payload: {"channel": "Main", "sdp": "..."}
+			var payload struct {
+				Channel string `json:"channel"`
+				SDP     string `json:"sdp"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				continue
+			}
+			sfuRoom := h.sfuMgr.Get(payload.Channel)
+			if sfuRoom == nil {
+				continue
+			}
+			var answer webrtc.SessionDescription
+			if err := json.Unmarshal([]byte(payload.SDP), &answer); err != nil {
+				continue
+			}
+			if err := sfuRoom.Answer(p.fingerprint, answer); err != nil {
+				h.log.Warn("SFU answer failed", zap.Error(err))
+			}
+
+		case MsgSFUICE:
+			// Payload: {"channel": "Main", "candidate": "...", "sdpMid": "...", "sdpMLineIndex": 0}
+			var payload struct {
+				Channel       string  `json:"channel"`
+				Candidate     string  `json:"candidate"`
+				SDPMid        *string `json:"sdpMid"`
+				SDPMLineIndex *uint16 `json:"sdpMLineIndex"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				continue
+			}
+			sfuRoom := h.sfuMgr.Get(payload.Channel)
+			if sfuRoom == nil {
+				continue
+			}
+			candidate := webrtc.ICECandidateInit{
+				Candidate:     payload.Candidate,
+				SDPMid:        payload.SDPMid,
+				SDPMLineIndex: payload.SDPMLineIndex,
+			}
+			if err := sfuRoom.AddICECandidate(p.fingerprint, candidate); err != nil {
+				h.log.Warn("SFU ICE candidate failed", zap.Error(err))
+			}
+
+		case MsgSFULeave:
+			var payload struct {
+				Channel string `json:"channel"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				continue
+			}
+			if sfuRoom := h.sfuMgr.Get(payload.Channel); sfuRoom != nil {
+				sfuRoom.Leave(p.fingerprint)
+				h.sfuMgr.GC(payload.Channel)
+			}
+
+		// ── Existing signaling (unchanged) ────────────────────────────────────
 
 		case MsgJoin:
 			if msg.From == "" || msg.Room == "" {
-				errMsg, _ := json.Marshal(Message{Type: MsgError, Payload: json.RawMessage(`"from and room required"`)})
-				p.send <- errMsg; continue
+				p.send <- errMsg("from and room required")
+				continue
 			}
-			// Check ban list
 			if banned, reason := h.store.isBanned(msg.From); banned {
 				payload, _ := json.Marshal(map[string]string{"reason": reason})
-				banned, _ := json.Marshal(Message{Type: MsgError, Payload: payload, From: "server"})
-				p.send <- banned
+				bannedMsg, _ := json.Marshal(Message{Type: MsgError, Payload: payload, From: "server"})
+				p.send <- bannedMsg
 				p.conn.WriteMessage(websocket.CloseMessage,
 					websocket.FormatCloseMessage(4003, "banned: "+reason))
-				h.log.Info("banned peer rejected", zap.String("fp", msg.From))
 				return
 			}
-
 			p.fingerprint = msg.From
 			p.room = msg.Room
 			room := h.room(msg.Room)
-
-			// Tell newcomer about existing peers
 			room.mu.RLock()
 			for fp := range room.peers {
 				if fp != p.fingerprint {
@@ -426,52 +559,48 @@ func (p *Peer) readPump(h *Hub) {
 				}
 			}
 			room.mu.RUnlock()
-
-			// Send history
 			if history := room.getHistory(); len(history) > 0 {
 				histPayload, _ := json.Marshal(history)
 				histMsg, _ := json.Marshal(Message{Type: MsgHistory, Room: p.room, Payload: histPayload})
 				p.send <- histMsg
 			}
-
 			room.add(p)
-
-			// Assign admin: permanent admin takes priority over first-to-join
 			room.mu.Lock()
 			if h.adminFp != "" {
 				room.admin = h.adminFp
 			} else if room.admin == "" {
 				room.admin = p.fingerprint
 			}
-			// Load persisted mods for this room (merges with any already in memory)
 			for fp, isMod := range h.store.getMods(msg.Room) {
-				if isMod { room.mods[fp] = true } else { delete(room.mods, fp) }
+				if isMod {
+					room.mods[fp] = true
+				} else {
+					delete(room.mods, fp)
+				}
 			}
 			room.mu.Unlock()
-
 			room.broadcast(raw, p.fingerprint)
-
-			// Send role info to new peer + broadcast updated roles
 			h.broadcastRoles(room)
-
-			// Start AFK checker for this room if not already running
 			go h.afkChecker(p.room)
-
-			h.log.Info("peer joined",
-				zap.String("fp", p.fingerprint),
-				zap.String("room", p.room),
-				zap.String("role", room.role(p.fingerprint)),
-				zap.Int("peers", room.size()))
+			h.log.Info("peer joined", zap.String("fp", p.fingerprint), zap.String("room", p.room), zap.Int("peers", room.size()))
 
 		case MsgOffer, MsgAnswer, MsgCandidate:
-			if p.room == "" { continue }
+			if p.room == "" {
+				continue
+			}
 			msg.From = p.fingerprint
 			fwd, _ := json.Marshal(msg)
 			room := h.room(p.room)
-			if msg.To != "" { room.unicast(fwd, msg.To) } else { room.broadcast(fwd, p.fingerprint) }
+			if msg.To != "" {
+				room.unicast(fwd, msg.To)
+			} else {
+				room.broadcast(fwd, p.fingerprint)
+			}
 
 		case MsgChat:
-			if p.room == "" { continue }
+			if p.room == "" {
+				continue
+			}
 			msg.From = p.fingerprint
 			fwd, _ := json.Marshal(msg)
 			h.room(p.room).appendHistory(StoredMessage{
@@ -482,14 +611,21 @@ func (p *Peer) readPump(h *Hub) {
 			h.room(p.room).broadcast(fwd, p.fingerprint)
 
 		case MsgPromote:
-			// Payload: {"target": "fp", "role": "mod"|"member"}
-			if p.room == "" { continue }
+			if p.room == "" {
+				continue
+			}
 			room := h.room(p.room)
 			if room.admin != p.fingerprint {
-				p.send <- errMsg("only admin can promote/demote"); continue
+				p.send <- errMsg("only admin can promote/demote")
+				continue
 			}
-			var payload struct{ Target string `json:"target"`; Role string `json:"role"` }
-			if err := json.Unmarshal(msg.Payload, &payload); err != nil { continue }
+			var payload struct {
+				Target string `json:"target"`
+				Role   string `json:"role"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				continue
+			}
 			isMod := payload.Role == "mod"
 			room.mu.Lock()
 			if isMod {
@@ -498,57 +634,67 @@ func (p *Peer) readPump(h *Hub) {
 				delete(room.mods, payload.Target)
 			}
 			room.mu.Unlock()
-			// Persist mod status so it survives server restarts
 			h.store.setMod(p.room, payload.Target, isMod)
 			h.broadcastRoles(room)
-			h.log.Info("role changed", zap.String("target", payload.Target), zap.String("role", payload.Role))
 
 		case MsgKick:
-			// Payload: {"target": "fp"}
-			if p.room == "" { continue }
+			if p.room == "" {
+				continue
+			}
 			room := h.room(p.room)
 			if !room.isPrivileged(p.fingerprint) {
-				p.send <- errMsg("insufficient permissions"); continue
+				p.send <- errMsg("insufficient permissions")
+				continue
 			}
-			var payload struct{ Target string `json:"target"` }
-			if err := json.Unmarshal(msg.Payload, &payload); err != nil { continue }
+			var payload struct {
+				Target string `json:"target"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				continue
+			}
 			if payload.Target == room.admin {
-				p.send <- errMsg("cannot kick admin"); continue
+				p.send <- errMsg("cannot kick admin")
+				continue
 			}
-			// Send kick command to target
 			cmd, _ := json.Marshal(map[string]string{"action": "kicked", "by": p.fingerprint})
 			cmdMsg, _ := json.Marshal(Message{Type: MsgCommand, Payload: cmd})
 			room.unicast(cmdMsg, payload.Target)
-			// Remove peer after a short delay (let the message arrive)
 			go func(target string) {
 				time.Sleep(500 * time.Millisecond)
 				room.mu.RLock()
 				peer, ok := room.peers[target]
 				room.mu.RUnlock()
 				if ok {
-					peer.conn.WriteMessage(websocket.CloseMessage,
-						websocket.FormatCloseMessage(4000, "kicked"))
+					peer.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4000, "kicked"))
 					peer.conn.Close()
 				}
 			}(payload.Target)
-			h.log.Info("peer kicked", zap.String("target", payload.Target), zap.String("by", p.fingerprint))
 
 		case MsgBan:
-			// Payload: {"target": "fp", "reason": "..."}
-			if p.room == "" { continue }
+			if p.room == "" {
+				continue
+			}
 			room := h.room(p.room)
 			if !room.isPrivileged(p.fingerprint) {
-				p.send <- errMsg("insufficient permissions"); continue
+				p.send <- errMsg("insufficient permissions")
+				continue
 			}
-			var payload struct{ Target string `json:"target"`; Reason string `json:"reason"` }
-			if err := json.Unmarshal(msg.Payload, &payload); err != nil { continue }
+			var payload struct {
+				Target string `json:"target"`
+				Reason string `json:"reason"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				continue
+			}
 			if payload.Target == room.admin {
-				p.send <- errMsg("cannot ban admin"); continue
+				p.send <- errMsg("cannot ban admin")
+				continue
 			}
 			reason := payload.Reason
-			if reason == "" { reason = "banned by " + p.fingerprint[:8] }
+			if reason == "" {
+				reason = "banned"
+			}
 			h.store.ban(payload.Target, reason)
-			// Notify the banned peer then close
 			cmd, _ := json.Marshal(map[string]string{"action": "banned", "reason": reason, "by": p.fingerprint})
 			cmdMsg, _ := json.Marshal(Message{Type: MsgCommand, Payload: cmd})
 			room.unicast(cmdMsg, payload.Target)
@@ -558,52 +704,61 @@ func (p *Peer) readPump(h *Hub) {
 				peer, ok := room.peers[target]
 				room.mu.RUnlock()
 				if ok {
-					peer.conn.WriteMessage(websocket.CloseMessage,
-						websocket.FormatCloseMessage(4003, "banned: "+reason))
+					peer.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4003, "banned: "+reason))
 					peer.conn.Close()
 				}
 			}(payload.Target)
-			// Broadcast updated ban list to all privileged peers
 			h.broadcastRoles(room)
-			h.log.Info("peer banned", zap.String("target", payload.Target), zap.String("reason", reason))
 
 		case MsgUnban:
-			// Payload: {"target": "fp"}
-			if p.room == "" { continue }
+			if p.room == "" {
+				continue
+			}
 			room := h.room(p.room)
 			if !room.isPrivileged(p.fingerprint) {
-				p.send <- errMsg("insufficient permissions"); continue
+				p.send <- errMsg("insufficient permissions")
+				continue
 			}
-			var payload struct{ Target string `json:"target"` }
-			if err := json.Unmarshal(msg.Payload, &payload); err != nil { continue }
+			var payload struct {
+				Target string `json:"target"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				continue
+			}
 			h.store.unban(payload.Target)
 			h.broadcastRoles(room)
-			h.log.Info("peer unbanned", zap.String("target", payload.Target))
 
 		case MsgMove:
-			// Payload: {"target": "fp", "channel": "Gaming"}
-			if p.room == "" { continue }
+			if p.room == "" {
+				continue
+			}
 			room := h.room(p.room)
 			if !room.isPrivileged(p.fingerprint) {
-				p.send <- errMsg("insufficient permissions"); continue
+				p.send <- errMsg("insufficient permissions")
+				continue
 			}
-			var payload struct{ Target string `json:"target"`; Channel string `json:"channel"` }
-			if err := json.Unmarshal(msg.Payload, &payload); err != nil { continue }
+			var payload struct {
+				Target  string `json:"target"`
+				Channel string `json:"channel"`
+			}
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				continue
+			}
 			cmd, _ := json.Marshal(map[string]string{"action": "move", "channel": payload.Channel})
 			cmdMsg, _ := json.Marshal(Message{Type: MsgCommand, Payload: cmd})
 			room.unicast(cmdMsg, payload.Target)
-			h.log.Info("peer moved", zap.String("target", payload.Target), zap.String("channel", payload.Channel))
 		}
 	}
 }
 
-// afkChecker runs as a goroutine per room, checking for inactive voice peers
 func (h *Hub) afkChecker(roomName string) {
 	ticker := time.NewTicker(afkCheckPeriod)
 	defer ticker.Stop()
 	for range ticker.C {
 		room := h.room(roomName)
-		if room.size() == 0 { return }
+		if room.size() == 0 {
+			return
+		}
 		now := time.Now()
 		room.mu.RLock()
 		var afkPeers []string
@@ -617,7 +772,6 @@ func (h *Hub) afkChecker(roomName string) {
 			cmd, _ := json.Marshal(map[string]string{"action": "move", "channel": "AFK"})
 			cmdMsg, _ := json.Marshal(Message{Type: MsgCommand, Payload: cmd})
 			room.unicast(cmdMsg, fp)
-			h.log.Info("AFK move", zap.String("fp", fp), zap.String("room", roomName))
 		}
 	}
 }
@@ -628,6 +782,18 @@ func errMsg(text string) []byte {
 	return msg
 }
 
+// ── Thread-safe writer ────────────────────────────────────────────────────────
+
+type threadSafeWriter struct {
+	*websocket.Conn
+	sync.Mutex
+}
+
+func (t *threadSafeWriter) WriteJSON(v any) error {
+	t.Lock(); defer t.Unlock()
+	return t.Conn.WriteJSON(v)
+}
+
 func (p *Peer) writePump(log *zap.Logger) {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() { ticker.Stop(); p.conn.Close() }()
@@ -635,28 +801,44 @@ func (p *Peer) writePump(log *zap.Logger) {
 		select {
 		case data, ok := <-p.send:
 			_ = p.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok { _ = p.conn.WriteMessage(websocket.CloseMessage, []byte{}); return }
+			if !ok {
+				_ = p.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
 			if err := p.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-				log.Warn("write error", zap.Error(err)); return
+				log.Warn("write error", zap.Error(err))
+				return
 			}
 		case <-ticker.C:
 			_ = p.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := p.conn.WriteMessage(websocket.PingMessage, nil); err != nil { return }
+			if err := p.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
 }
 
+// ── Health ────────────────────────────────────────────────────────────────────
+
 func (h *Hub) healthHandler(w http.ResponseWriter, _ *http.Request) {
-	h.mu.RLock(); roomCount := len(h.rooms); h.mu.RUnlock()
+	h.mu.RLock()
+	roomCount := len(h.rooms)
+	h.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"status": "ok", "rooms": roomCount, "time": time.Now().UTC(),
-		"bans": len(h.store.listBans()),
+		"status":    "ok",
+		"rooms":     roomCount,
+		"sfu_rooms": h.sfuMgr.Stats(),
+		"bans":      len(h.store.listBans()),
+		"time":      time.Now().UTC(),
 	})
 }
 
+// ── Main ──────────────────────────────────────────────────────────────────────
+
 func main() {
 	cfg := configFromFlags()
+
 	var log *zap.Logger
 	var err error
 	if os.Getenv("QUIPU_ENV") == "production" {
@@ -664,25 +846,57 @@ func main() {
 	} else {
 		log, err = zap.NewDevelopment()
 	}
-	if err != nil { panic(err) }
+	if err != nil {
+		panic(err)
+	}
 	defer log.Sync()
 
-	store := loadDataStore(cfg.BansFile, log)
-	hub   := newHub(store, cfg.AdminFp, log)
-	if cfg.AdminFp != "" {
-		log.Info("permanent admin configured", zap.String("fp", cfg.AdminFp))
-	} else {
-		log.Info("no permanent admin — first to join becomes admin")
+	store := loadDataStore(cfg.DataFile, log)
+
+	// SFU signal function — sends JSON to a specific peer over their WS connection.
+	// We use a closure that gets the hub after construction.
+	var hub *Hub
+	sfuSignal := func(fp string, m map[string]any) error {
+		if hub == nil {
+			return nil
+		}
+		data, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		// Find the peer across all rooms and send
+		hub.mu.RLock()
+		for _, room := range hub.rooms {
+			room.mu.RLock()
+			if peer, ok := room.peers[fp]; ok {
+				peer.send <- data
+				room.mu.RUnlock()
+				hub.mu.RUnlock()
+				return nil
+			}
+			room.mu.RUnlock()
+		}
+		hub.mu.RUnlock()
+		return nil
 	}
-	mux  := http.NewServeMux()
-	mux.HandleFunc("/ws",     hub.serveWS)
+
+	sfuMgr := sfu.NewManager(log, sfuSignal)
+	hub = newHub(store, sfuMgr, cfg.AdminFp, log)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", hub.serveWS)
 	mux.HandleFunc("/health", hub.healthHandler)
 
-	log.Info("quipu signaling starting", zap.String("addr", cfg.Addr), zap.String("bans", cfg.BansFile))
+	log.Info("quipu server starting",
+		zap.String("addr", cfg.Addr),
+		zap.String("data", cfg.DataFile))
+
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		err = http.ListenAndServeTLS(cfg.Addr, cfg.TLSCert, cfg.TLSKey, mux)
 	} else {
 		err = http.ListenAndServe(cfg.Addr, mux)
 	}
-	if err != nil { log.Fatal("server error", zap.Error(err)) }
+	if err != nil {
+		log.Fatal("server error", zap.Error(err))
+	}
 }
