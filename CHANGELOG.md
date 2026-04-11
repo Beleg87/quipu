@@ -1,6 +1,6 @@
-## [0.1.24] - 2026-04-11
+## [0.1.25] - 2026-04-11
 
-Screen drawer always visible as tab when in voice, opens on demand
+Sound effects, fix screen share on reconnect
 
 # Changelog
 

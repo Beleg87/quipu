@@ -134,6 +134,80 @@ function applyVolumeBoost(fp: string, vol: number) {
   node.gain.gain.value = vol / 100;
 }
 
+
+// ── Sound system ──────────────────────────────────────────────────────────────
+// All sounds generated via Web Audio API — no files needed
+
+let audioCtx: AudioContext | null = null;
+
+function getAudioCtx(): AudioContext {
+  if (!audioCtx || audioCtx.state === "closed") {
+    audioCtx = new AudioContext();
+  }
+  return audioCtx;
+}
+
+function playTone(
+  frequency: number,
+  duration: number,
+  type: OscillatorType = "sine",
+  volume = 0.15,
+  fadeOut = true,
+) {
+  try {
+    const ctx  = getAudioCtx();
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = type;
+    osc.frequency.setValueAtTime(frequency, ctx.currentTime);
+    gain.gain.setValueAtTime(volume, ctx.currentTime);
+    if (fadeOut) gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + duration);
+  } catch {}
+}
+
+const sounds = {
+  // Peer joined signaling (soft double-blip up)
+  peerJoin: () => {
+    playTone(660, 0.12, "sine", 0.12);
+    setTimeout(() => playTone(880, 0.15, "sine", 0.12), 120);
+  },
+  // Peer left (soft double-blip down)
+  peerLeave: () => {
+    playTone(880, 0.12, "sine", 0.12);
+    setTimeout(() => playTone(660, 0.15, "sine", 0.10), 120);
+  },
+  // Joined voice channel (warm chord)
+  voiceJoin: () => {
+    playTone(523, 0.25, "sine", 0.10); // C
+    setTimeout(() => playTone(659, 0.25, "sine", 0.08), 60); // E
+    setTimeout(() => playTone(784, 0.30, "sine", 0.07), 120); // G
+  },
+  // Left voice channel (reverse chord, quieter)
+  voiceLeave: () => {
+    playTone(784, 0.15, "sine", 0.08);
+    setTimeout(() => playTone(523, 0.20, "sine", 0.07), 100);
+  },
+  // Screen share started (bright ascending)
+  screenShare: () => {
+    playTone(880, 0.12, "sine", 0.10);
+    setTimeout(() => playTone(1100, 0.12, "sine", 0.09), 100);
+    setTimeout(() => playTone(1320, 0.20, "sine", 0.08), 200);
+  },
+  // Remote control request (attention — two-tone alert)
+  remoteRequest: () => {
+    for (let i = 0; i < 3; i++) {
+      setTimeout(() => {
+        playTone(880, 0.08, "square", 0.08);
+        setTimeout(() => playTone(1100, 0.08, "square", 0.07), 90);
+      }, i * 220);
+    }
+  },
+};
+
 // ── AFK silence detection ─────────────────────────────────────────────────────
 
 let afkTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1281,7 +1355,10 @@ function showOverlay(title: string, body: string, permanent: boolean) {
 
 function onPeerJoined(fp: string) {
   if (!fp || fp === state.fingerprint) return;
-  if (!state.peers.has(fp)) state.peers.set(fp, { fp, pc: null as any, muted: false });
+  if (!state.peers.has(fp)) {
+    state.peers.set(fp, { fp, pc: null as any, muted: false });
+    sounds.peerJoin(); // new peer connected to signaling
+  }
   // Do NOT add to voicePeers here — voice membership is tracked via __voice-join broadcasts only
   renderSidebar();
   broadcastNickname(); // make sure new peer gets our nickname
@@ -1456,9 +1533,10 @@ async function toggleVoiceChannel(ch: string) {
   if (sfuOk) {
     voiceMode = "sfu";
     voiceLabel.textContent = `\uD83D\uDD0A ${ch} \u00B7 SFU`;
+    sounds.voiceJoin();
     broadcastNickname();
     renderSidebar();
-    renderScreenGrid(); // show the drawer tab
+    renderScreenGrid();
     return;
   }
 
@@ -1708,10 +1786,14 @@ function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
     }
   }
   activeScreens.set(finalKey, { stream, label });
-  // Only auto-open if we matched a real share (not just a stale track on reconnect)
-  // A real share has either a pending meta entry matched, or track is unmuted with content
-  if (finalKey !== `__stream:${stream.id}` || !track.muted) {
+  // Open drawer when:
+  // 1. Track is unmuted (real screen share content flowing)
+  // 2. OR we matched a pending __screen-start broadcast (label is set)
+  if (!track.muted || label !== "Sharing...") {
     openScreenDrawer();
+  } else {
+    // Muted placeholder — just update the tab count silently
+    renderScreenGrid();
   }
   track.addEventListener("ended", () => {
     for (const [k, v] of activeScreens) {
@@ -1724,6 +1806,7 @@ function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
 function onRemoteScreenStart(msg: any) {
   const fp    = msg.from ?? msg.payload?.from;
   const label = msg.payload?.label ?? displayName(fp);
+  sounds.screenShare(); // someone started sharing
   console.log("[SFU] screen-start from:", fp, "label:", label, "activeScreens:", [...activeScreens.keys()]);
   // Find any __stream: entry not yet keyed to a real fp, re-key it
   const streamKey = [...activeScreens.keys()].find(k => k.startsWith("__stream:"));
@@ -1962,6 +2045,7 @@ function leaveVoice() {
   const ch = state.activeVoice;
   state.activeVoice = null;
   voicePeers.clear();
+  sounds.voiceLeave();
   // Remove screen drawer — no longer in voice
   document.getElementById("screen-drawer")?.remove();
   screenDrawerOpen = false;
