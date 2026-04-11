@@ -1,4 +1,9 @@
 // Package sfu implements a Selective Forwarding Unit for Quipu voice rooms.
+// Design principles:
+//   - One PeerConnection per participant per room
+//   - Server receives audio from each client, forwards to all others
+//   - No transcoding — raw RTP forwarding only
+//   - Renegotiation is guarded by per-peer mutex to prevent state machine conflicts
 package sfu
 
 import (
@@ -18,9 +23,12 @@ type SignalFunc func(fp string, msg map[string]any) error
 
 // Peer represents one SFU participant.
 type Peer struct {
-	fp  string
-	pc  *webrtc.PeerConnection
-	ws  SignalFunc
+	fp          string
+	pc          *webrtc.PeerConnection
+	ws          SignalFunc
+	mu          sync.Mutex // serialises renegotiation for this peer
+	pendingICE  []webrtc.ICECandidateInit // ICE candidates queued before answer
+	remoteSet   bool                       // true once SetRemoteDescription has been called
 }
 
 // Room holds all peers and local tracks for a single voice channel.
@@ -28,18 +36,17 @@ type Room struct {
 	mu     sync.Mutex
 	name   string
 	peers  map[string]*Peer
-	tracks map[string]*webrtc.TrackLocalStaticRTP
+	tracks map[string]*webrtc.TrackLocalStaticRTP // trackID → local track
 	log    *zap.Logger
-	signal SignalFunc
 }
 
-func NewRoom(name string, log *zap.Logger, signal SignalFunc) *Room {
+// NewRoom creates an empty SFU room and starts the keyframe ticker.
+func NewRoom(name string, log *zap.Logger) *Room {
 	r := &Room{
 		name:   name,
 		peers:  make(map[string]*Peer),
 		tracks: make(map[string]*webrtc.TrackLocalStaticRTP),
 		log:    log,
-		signal: signal,
 	}
 	go r.keyframeTicker()
 	return r
@@ -64,16 +71,19 @@ func (r *Room) keyframeTicker() {
 	}
 }
 
-// Join creates a PeerConnection for a new participant.
-// It registers the peer, adds existing tracks to it, creates an offer and
-// returns it. It does NOT call signalAll for this peer — that would cause the
-// double-SetLocalDescription error. Existing peers are renegotiated separately.
+// ── Join / Leave ──────────────────────────────────────────────────────────────
+
+// Join creates a PeerConnection for fp, adds existing tracks, creates the
+// initial offer and returns it. Existing peers are renegotiated asynchronously.
 func (r *Room) Join(fp string, ws SignalFunc) (*webrtc.SessionDescription, error) {
 	r.log.Info("SFU join", zap.String("room", r.name), zap.String("fp", fp))
 
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.l.google.com:19302"}},
+			{URLs: []string{
+				"stun:stun.l.google.com:19302",
+				"stun:stun1.l.google.com:19302",
+			}},
 		},
 	})
 	if err != nil {
@@ -82,7 +92,7 @@ func (r *Room) Join(fp string, ws SignalFunc) (*webrtc.SessionDescription, error
 
 	peer := &Peer{fp: fp, pc: pc, ws: ws}
 
-	// sendrecv: we want to receive from the client and send others' audio back
+	// sendrecv: receive audio from client, send others' audio back
 	if _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
 		Direction: webrtc.RTPTransceiverDirectionSendrecv,
 	}); err != nil {
@@ -90,7 +100,7 @@ func (r *Room) Join(fp string, ws SignalFunc) (*webrtc.SessionDescription, error
 		return nil, fmt.Errorf("AddTransceiverFromKind: %w", err)
 	}
 
-	// Trickle ICE to client
+	// Trickle ICE → client
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
 			return
@@ -106,41 +116,43 @@ func (r *Room) Join(fp string, ws SignalFunc) (*webrtc.SessionDescription, error
 
 	// Clean up on connection failure
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		r.log.Info("SFU peer state", zap.String("fp", fp), zap.String("state", state.String()))
-		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
+		r.log.Info("SFU peer state",
+			zap.String("fp", fp), zap.String("state", state.String()))
+		switch state {
+		case webrtc.PeerConnectionStateFailed,
+			webrtc.PeerConnectionStateClosed:
 			r.Leave(fp)
 		}
 	})
 
-	// Incoming audio track from client → fan out to all other peers
+	// Incoming track from client → register and forward to all other peers
 	pc.OnTrack(func(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-		r.log.Info("SFU track received", zap.String("fp", fp), zap.String("kind", t.Kind().String()))
-		local := r.addTrack(fp, t)
+		r.log.Info("SFU track received",
+			zap.String("fp", fp), zap.String("kind", t.Kind().String()))
+		local := r.registerTrack(fp, t)
 		if local == nil {
 			return
 		}
-		defer r.removeTrack(local)
+		defer r.unregisterTrack(local.ID())
 		r.forwardRTP(t, local)
 	})
 
 	r.mu.Lock()
-
-	// Add all existing tracks (from other peers) to this new peer's PC
+	// Add all existing tracks from other peers to this new peer's PC
 	for trackID, track := range r.tracks {
-		// skip own tracks (shouldn't exist yet, but defensive)
-		if len(trackID) > len(fp) && trackID[:len(fp)] == fp {
+		ownerFp := ownerFromTrackID(trackID)
+		if ownerFp == fp {
 			continue
 		}
 		if _, err := pc.AddTrack(track); err != nil {
-			r.log.Warn("AddTrack to new peer failed", zap.Error(err))
+			r.log.Warn("AddTrack to new peer failed",
+				zap.String("fp", fp), zap.Error(err))
 		}
 	}
-
 	r.peers[fp] = peer
-
 	r.mu.Unlock()
 
-	// Create the initial offer for this peer only
+	// Create initial offer for this peer
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
 		r.removePeer(fp)
@@ -153,85 +165,28 @@ func (r *Room) Join(fp string, ws SignalFunc) (*webrtc.SessionDescription, error
 		return nil, fmt.Errorf("SetLocalDescription: %w", err)
 	}
 
-	// Renegotiate all OTHER existing peers so they get a slot for this new peer's tracks
-	// (tracks themselves are added in addTrack when OnTrack fires)
-	go r.renegotiateExisting(fp)
+	// Renegotiate all existing peers asynchronously to add a send slot for fp's future track
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		r.mu.Lock()
+		peers := r.copyPeers()
+		r.mu.Unlock()
+		for existFp, existPeer := range peers {
+			if existFp == fp {
+				continue
+			}
+			existPeer.mu.Lock()
+			r.mu.Lock()
+			_ = r.renegotiate(existPeer)
+			r.mu.Unlock()
+			existPeer.mu.Unlock()
+		}
+	}()
 
 	return &offer, nil
 }
 
-// renegotiateExisting sends new offers to all peers except the one who just joined.
-// Called in a goroutine after Join so it doesn't block or race with SetLocalDescription.
-func (r *Room) renegotiateExisting(exceptFp string) {
-	time.Sleep(50 * time.Millisecond) // tiny delay to let ICE gathering start
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for fp, peer := range r.peers {
-		if fp == exceptFp {
-			continue
-		}
-		if peer.pc.ConnectionState() == webrtc.PeerConnectionStateClosed {
-			continue
-		}
-		if err := r.offerPeer(peer); err != nil {
-			r.log.Warn("renegotiate existing peer failed", zap.String("fp", fp), zap.Error(err))
-		}
-	}
-}
-
-// offerPeer creates and sends a new offer to a single peer (must hold r.mu).
-func (r *Room) offerPeer(peer *Peer) error {
-	// Build set of tracks already being sent
-	sending := map[string]bool{}
-	for _, sender := range peer.pc.GetSenders() {
-		if sender.Track() == nil {
-			continue
-		}
-		sending[sender.Track().ID()] = true
-		// Remove senders for tracks that no longer exist
-		if _, exists := r.tracks[sender.Track().ID()]; !exists {
-			if err := peer.pc.RemoveTrack(sender); err != nil {
-				return err
-			}
-		}
-	}
-	for _, recv := range peer.pc.GetReceivers() {
-		if recv.Track() != nil {
-			sending[recv.Track().ID()] = true
-		}
-	}
-	// Add missing tracks (skip own tracks)
-	for trackID, track := range r.tracks {
-		if len(trackID) > len(peer.fp) && trackID[:len(peer.fp)] == peer.fp {
-			continue
-		}
-		if !sending[trackID] {
-			if _, err := peer.pc.AddTrack(track); err != nil {
-				return err
-			}
-		}
-	}
-	// Only renegotiate if signaling state is stable
-	if peer.pc.SignalingState() != webrtc.SignalingStateStable {
-		return nil // skip — client will handle renegotiation via rollback
-	}
-	offer, err := peer.pc.CreateOffer(nil)
-	if err != nil {
-		return err
-	}
-	if err = peer.pc.SetLocalDescription(offer); err != nil {
-		return err
-	}
-	offerJSON, err := json.Marshal(offer)
-	if err != nil {
-		return err
-	}
-	return peer.ws(peer.fp, map[string]any{
-		"type": "sfu-offer",
-		"sdp":  string(offerJSON),
-	})
-}
-
+// Answer processes the SDP answer from the client.
 func (r *Room) Answer(fp string, answer webrtc.SessionDescription) error {
 	r.mu.Lock()
 	peer, ok := r.peers[fp]
@@ -239,9 +194,26 @@ func (r *Room) Answer(fp string, answer webrtc.SessionDescription) error {
 	if !ok {
 		return fmt.Errorf("peer %s not found", fp)
 	}
-	return peer.pc.SetRemoteDescription(answer)
+
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+
+	if err := peer.pc.SetRemoteDescription(answer); err != nil {
+		return err
+	}
+	peer.remoteSet = true
+
+	// Flush any ICE candidates that arrived before the answer
+	for _, c := range peer.pendingICE {
+		if err := peer.pc.AddICECandidate(c); err != nil {
+			r.log.Warn("pending ICE flush failed", zap.Error(err))
+		}
+	}
+	peer.pendingICE = nil
+	return nil
 }
 
+// AddICECandidate queues a candidate if the remote description isn't set yet.
 func (r *Room) AddICECandidate(fp string, candidate webrtc.ICECandidateInit) error {
 	r.mu.Lock()
 	peer, ok := r.peers[fp]
@@ -249,9 +221,18 @@ func (r *Room) AddICECandidate(fp string, candidate webrtc.ICECandidateInit) err
 	if !ok {
 		return fmt.Errorf("peer %s not found", fp)
 	}
+
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+
+	if !peer.remoteSet {
+		peer.pendingICE = append(peer.pendingICE, candidate)
+		return nil
+	}
 	return peer.pc.AddICECandidate(candidate)
 }
 
+// Leave removes and closes a peer's connection.
 func (r *Room) Leave(fp string) {
 	peer := r.removePeer(fp)
 	if peer == nil {
@@ -260,18 +241,19 @@ func (r *Room) Leave(fp string) {
 	r.log.Info("SFU leave", zap.String("room", r.name), zap.String("fp", fp))
 	peer.pc.Close()
 	// Renegotiate remaining peers to remove this peer's tracks
-	go r.renegotiateExisting("")
-}
-
-func (r *Room) removePeer(fp string) *Peer {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	peer, ok := r.peers[fp]
-	if !ok {
-		return nil
-	}
-	delete(r.peers, fp)
-	return peer
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		r.mu.Lock()
+		peers := r.copyPeers()
+		r.mu.Unlock()
+		for _, p := range peers {
+			p.mu.Lock()
+			r.mu.Lock()
+			_ = r.renegotiate(p)
+			r.mu.Unlock()
+			p.mu.Unlock()
+		}
+	}()
 }
 
 func (r *Room) PeerCount() int {
@@ -282,7 +264,17 @@ func (r *Room) PeerCount() int {
 
 // ── Track management ──────────────────────────────────────────────────────────
 
-func (r *Room) addTrack(sourceFp string, remote *webrtc.TrackRemote) *webrtc.TrackLocalStaticRTP {
+// ownerFromTrackID extracts the fingerprint prefix from a track ID like "fp:trackid"
+func ownerFromTrackID(id string) string {
+	for i, c := range id {
+		if c == ':' {
+			return id[:i]
+		}
+	}
+	return ""
+}
+
+func (r *Room) registerTrack(sourceFp string, remote *webrtc.TrackRemote) *webrtc.TrackLocalStaticRTP {
 	trackID := sourceFp + ":" + remote.ID()
 	local, err := webrtc.NewTrackLocalStaticRTP(
 		remote.Codec().RTPCodecCapability,
@@ -296,38 +288,34 @@ func (r *Room) addTrack(sourceFp string, remote *webrtc.TrackRemote) *webrtc.Tra
 
 	r.mu.Lock()
 	r.tracks[trackID] = local
-	// Immediately add this track to all existing peers except the source
-	for fp, peer := range r.peers {
+	// Immediately offer new track to all existing peers except the source
+	peers := r.copyPeers()
+	r.mu.Unlock()
+
+	for fp, p := range peers {
 		if fp == sourceFp {
 			continue
 		}
-		if _, err := peer.pc.AddTrack(local); err != nil {
-			r.log.Warn("AddTrack to existing peer failed", zap.String("fp", fp), zap.Error(err))
+		p.mu.Lock()
+		r.mu.Lock()
+		if _, err := p.pc.AddTrack(local); err != nil {
+			r.log.Warn("AddTrack after registerTrack failed",
+				zap.String("fp", fp), zap.Error(err))
+			r.mu.Unlock()
+			p.mu.Unlock()
 			continue
 		}
-		// Renegotiate this peer if stable
-		if peer.pc.SignalingState() == webrtc.SignalingStateStable {
-			p := peer
-			go func() {
-				r.mu.Lock()
-				defer r.mu.Unlock()
-				if err := r.offerPeer(p); err != nil {
-					r.log.Warn("offer after addTrack failed", zap.Error(err))
-				}
-			}()
-		}
+		_ = r.renegotiate(p)
+		r.mu.Unlock()
+		p.mu.Unlock()
 	}
-	r.mu.Unlock()
 
 	return local
 }
 
-func (r *Room) removeTrack(local *webrtc.TrackLocalStaticRTP) {
-	if local == nil {
-		return
-	}
+func (r *Room) unregisterTrack(trackID string) {
 	r.mu.Lock()
-	delete(r.tracks, local.ID())
+	delete(r.tracks, trackID)
 	r.mu.Unlock()
 }
 
@@ -348,4 +336,85 @@ func (r *Room) forwardRTP(remote *webrtc.TrackRemote, local *webrtc.TrackLocalSt
 			return
 		}
 	}
+}
+
+// ── Renegotiation ─────────────────────────────────────────────────────────────
+
+// renegotiate sends a new offer to peer reflecting current track state.
+// Caller must hold both peer.mu and r.mu.
+func (r *Room) renegotiate(peer *Peer) error {
+	// Only renegotiate if stable — otherwise wait for client to finish
+	if peer.pc.SignalingState() != webrtc.SignalingStateStable {
+		return nil
+	}
+	if peer.pc.ConnectionState() == webrtc.PeerConnectionStateClosed {
+		return nil
+	}
+
+	// Add any missing tracks
+	sending := map[string]bool{}
+	for _, sender := range peer.pc.GetSenders() {
+		if sender.Track() == nil {
+			continue
+		}
+		sending[sender.Track().ID()] = true
+		// Remove senders whose track is gone
+		if _, exists := r.tracks[sender.Track().ID()]; !exists {
+			if err := peer.pc.RemoveTrack(sender); err != nil {
+				return err
+			}
+		}
+	}
+	for _, recv := range peer.pc.GetReceivers() {
+		if recv.Track() != nil {
+			sending[recv.Track().ID()] = true
+		}
+	}
+	for trackID, track := range r.tracks {
+		if ownerFromTrackID(trackID) == peer.fp {
+			continue
+		}
+		if !sending[trackID] {
+			if _, err := peer.pc.AddTrack(track); err != nil {
+				return err
+			}
+		}
+	}
+
+	offer, err := peer.pc.CreateOffer(nil)
+	if err != nil {
+		return err
+	}
+	if err = peer.pc.SetLocalDescription(offer); err != nil {
+		return err
+	}
+	offerJSON, err := json.Marshal(offer)
+	if err != nil {
+		return err
+	}
+	return peer.ws(peer.fp, map[string]any{
+		"type": "sfu-offer",
+		"sdp":  string(offerJSON),
+	})
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+func (r *Room) removePeer(fp string) *Peer {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	peer, ok := r.peers[fp]
+	if !ok {
+		return nil
+	}
+	delete(r.peers, fp)
+	return peer
+}
+
+func (r *Room) copyPeers() map[string]*Peer {
+	out := make(map[string]*Peer, len(r.peers))
+	for k, v := range r.peers {
+		out[k] = v
+	}
+	return out
 }

@@ -1,6 +1,6 @@
-## [0.1.10] - 2026-04-11
+## [0.1.11] - 2026-04-11
 
-Fix SFU join race condition, P2P voice cleanup, speaking indicator, audio device selection, noise suppression, channel peer visibility, volume slider fix
+SFU: fix renegotiation race, ICE candidate queuing, per-peer signaling
 
 # Changelog
 

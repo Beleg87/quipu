@@ -499,7 +499,7 @@ func (p *Peer) readPump(h *Hub) {
 				continue
 			}
 			if err := sfuRoom.Answer(p.fingerprint, answer); err != nil {
-				h.log.Warn("SFU answer failed", zap.Error(err))
+				h.log.Debug("SFU answer skipped", zap.Error(err))
 			}
 
 		case MsgSFUICE:
@@ -523,7 +523,8 @@ func (p *Peer) readPump(h *Hub) {
 				SDPMLineIndex: payload.SDPMLineIndex,
 			}
 			if err := sfuRoom.AddICECandidate(p.fingerprint, candidate); err != nil {
-				h.log.Warn("SFU ICE candidate failed", zap.Error(err))
+				// "peer not found" is expected when candidates arrive after peer left — not an error
+				h.log.Debug("SFU ICE candidate skipped", zap.Error(err))
 			}
 
 		case MsgSFULeave:
@@ -888,32 +889,8 @@ func main() {
 	// ── Server ────────────────────────────────────────────────────────────────
 	store := loadDataStore(cfg.DataFile, log)
 
-	var hub *Hub
-	sfuSignal := func(fp string, m map[string]any) error {
-		if hub == nil {
-			return nil
-		}
-		data, err := json.Marshal(m)
-		if err != nil {
-			return err
-		}
-		hub.mu.RLock()
-		for _, room := range hub.rooms {
-			room.mu.RLock()
-			if peer, ok := room.peers[fp]; ok {
-				peer.send <- data
-				room.mu.RUnlock()
-				hub.mu.RUnlock()
-				return nil
-			}
-			room.mu.RUnlock()
-		}
-		hub.mu.RUnlock()
-		return nil
-	}
-
-	sfuMgr := sfu.NewManager(log, sfuSignal)
-	hub = newHub(store, sfuMgr, cfg.AdminFp, log)
+	sfuMgr := sfu.NewManager(log)
+	hub    := newHub(store, sfuMgr, cfg.AdminFp, log)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", hub.serveWS)
