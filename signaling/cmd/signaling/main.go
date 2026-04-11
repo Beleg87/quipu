@@ -619,11 +619,20 @@ func (p *Peer) readPump(h *Hub) {
 			}
 			msg.From = p.fingerprint
 			fwd, _ := json.Marshal(msg)
-			h.room(p.room).appendHistory(StoredMessage{
-				From:    p.fingerprint,
-				Payload: msg.Payload,
-				At:      time.Now().UnixMilli(),
-			})
+			// Only store real user messages in history — skip internal signals
+			var payload struct{ Text string `json:"text"` }
+			isInternal := false
+			if err := json.Unmarshal(msg.Payload, &payload); err == nil {
+				t := payload.Text
+				isInternal = len(t) > 2 && t[0] == '_' && t[1] == '_'
+			}
+			if !isInternal {
+				h.room(p.room).appendHistory(StoredMessage{
+					From:    p.fingerprint,
+					Payload: msg.Payload,
+					At:      time.Now().UnixMilli(),
+				})
+			}
 			h.room(p.room).broadcast(fwd, p.fingerprint)
 
 		case MsgPromote:

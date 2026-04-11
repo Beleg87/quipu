@@ -1,6 +1,6 @@
-## [0.1.15] - 2026-04-11
+## [0.1.16] - 2026-04-11
 
-Fix voice peer list sync, screen share stream attachment, updater Application Control compatibility
+Fix: hide internal msgs from chat, screen share navigation bar, stop server storing internal messages
 
 # Changelog
 

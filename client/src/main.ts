@@ -614,7 +614,6 @@ function addVoiceChannel() {
 // ── Text view ─────────────────────────────────────────────────────────────────
 
 function showText(ch: string, force = false) {
-  // Don't switch away from screen grid unless forced or no screens active
   if (!force && activeScreens.size > 0) return;
   state.activeText = ch;
   // Clear unread badge
@@ -1735,6 +1734,7 @@ function onRemoteScreenStop(msg: any) {
   pendingScreenMeta.delete(fp);
   if (focusedScreen === fp) focusedScreen = null;
   renderScreenGrid();
+  renderSidebar();
 }
 
 // ── Screen grid renderer ──────────────────────────────────────────────────────
@@ -1744,10 +1744,11 @@ function renderScreenGrid() {
   if (!main) return;
 
   if (activeScreens.size === 0) {
-    // No screens — restore last text view
     if (state.activeText) showText(state.activeText, true);
+    renderSidebar(); // update screen bar
     return;
   }
+  renderSidebar(); // update screen bar with current sharers
 
   // Build screen grid HTML
   const focused = focusedScreen && activeScreens.has(focusedScreen) ? focusedScreen : null;

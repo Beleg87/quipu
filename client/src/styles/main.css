@@ -446,3 +446,25 @@ input  { font: inherit; }
   width: 100%; height: 100%; object-fit: contain;
   flex: 1; display: block; background: #000;
 }
+
+/* ── Screen share bar in sidebar ── */
+.screen-share-bar {
+  padding: 0.35rem 0.6rem;
+  background: var(--accent-dim);
+  border-bottom: 1px solid var(--border);
+}
+.screen-bar-row {
+  display: flex; align-items: center; gap: 0.4rem;
+}
+.screen-bar-icon { font-size: 0.85rem; flex-shrink: 0; }
+.screen-bar-label {
+  flex: 1; font-size: 0.75rem; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.screen-bar-btn {
+  font-size: 0.7rem; padding: 0.2rem 0.5rem;
+  background: var(--accent-hi); color: #fff;
+  border: none; border-radius: var(--radius);
+  cursor: pointer; font-family: inherit; flex-shrink: 0;
+}
+.screen-bar-btn:hover { opacity: 0.85; }
