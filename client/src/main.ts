@@ -491,6 +491,12 @@ function renderSidebar() {
     });
     // Also show peers in active voice channel
     if (state.activeVoice) {
+      // Keep voicePeers in sync with channelPeers — source of truth
+      const chSet = channelPeers.get(state.activeVoice) ?? new Set<string>();
+      chSet.forEach(fp => { if (fp !== state.fingerprint) voicePeers.add(fp); });
+      // Remove peers from voicePeers who left the channel
+      voicePeers.forEach(fp => { if (!chSet.has(fp)) voicePeers.delete(fp); });
+
       const activeEl = vList.querySelector(`[data-ch="${state.activeVoice}"]`);
       if (activeEl) {
         const peersDiv = document.createElement("div");
@@ -1270,7 +1276,8 @@ function onPeerJoined(fp: string) {
   // Do NOT add to voicePeers here — voice membership is tracked via __voice-join broadcasts only
   renderSidebar();
   broadcastNickname(); // make sure new peer gets our nickname
-  // Tell the new peer which voice channel we're in (if any) so their sidebar is accurate
+  // Tell everyone (including new peer) our current voice channel
+  // This is a broadcast so all peers get updated sidebar state
   if (state.activeVoice && state.connected) {
     invoke("send_chat", {
       text: `__voice-join:${state.activeVoice}`,
@@ -1691,7 +1698,10 @@ function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
   renderScreenGrid();
 
   track.addEventListener("ended", () => {
-    activeScreens.delete(key);
+    // Delete by stream key or fp key (whichever is current)
+    for (const [k, v] of activeScreens) {
+      if (v.stream === stream) { activeScreens.delete(k); break; }
+    }
     if (focusedScreen === key) focusedScreen = null;
     renderScreenGrid();
   });
@@ -1700,17 +1710,23 @@ function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
 function onRemoteScreenStart(msg: any) {
   const fp    = msg.from ?? msg.payload?.from;
   const label = msg.payload?.label ?? displayName(fp);
-  // Find existing temp entry and re-key it
+  // Find existing temp entry (by stream: prefix) and re-key it to the real fp
   const streamKey = [...activeScreens.keys()].find(k => k.startsWith("__stream:"));
   if (streamKey) {
     const val = activeScreens.get(streamKey)!;
     activeScreens.delete(streamKey);
     activeScreens.set(fp, { ...val, label });
+    renderScreenGrid();
+    // Re-attach stream to the new video element (renderScreenGrid creates a new DOM element)
+    requestAnimationFrame(() => {
+      const vid = document.getElementById(`vid-${fp}`) as HTMLVideoElement | null;
+      if (vid && vid.srcObject !== val.stream) vid.srcObject = val.stream;
+    });
   } else {
-    // Track not arrived yet — store metadata for when it does
+    // Broadcast arrived before track — store metadata for when onSFUVideoTrack fires
     pendingScreenMeta.set(fp, label);
+    renderScreenGrid(); // show placeholder if needed
   }
-  renderScreenGrid();
 }
 
 function onRemoteScreenStop(msg: any) {

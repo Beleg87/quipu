@@ -5,7 +5,6 @@ import (
 	"flag"
 	"net/http"
 	"os"
-	"os/exec"
 	"sync"
 	"time"
 
@@ -877,23 +876,12 @@ func main() {
 	// Skip update check if running as "dev" build or if QUIPU_NO_UPDATE is set.
 	if Version != "dev" && os.Getenv("QUIPU_NO_UPDATE") == "" {
 		if shouldRestart := updater.CheckAndUpdate(Version, log); shouldRestart {
-			log.Info("restarting with updated binary...")
+			log.Info("update applied — exiting so restart loop picks up new binary")
 			log.Sync()
-			// Re-exec self — the new binary is already in place
-			exe, err := os.Executable()
-			if err != nil {
-				log.Error("could not determine executable path for restart", zap.Error(err))
-			} else {
-				cmd := exec.Command(exe, os.Args[1:]...)
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				cmd.Stdin  = os.Stdin
-				if err := cmd.Start(); err != nil {
-					log.Error("restart failed", zap.Error(err))
-				} else {
-					os.Exit(0) // old process exits cleanly
-				}
-			}
+			// Don't re-exec — on Windows, Application Control policies may block
+			// spawning a newly downloaded binary. Instead, exit cleanly and let
+			// the .bat restart loop relaunch the updated binary automatically.
+			os.Exit(0)
 		}
 	}
 

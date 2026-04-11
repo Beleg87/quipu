@@ -1,6 +1,6 @@
-## [0.1.14] - 2026-04-11
+## [0.1.15] - 2026-04-11
 
-Fix: hide internal messages from chat, screen share visible to all, debounce SFU renegotiation glitch
+Fix voice peer list sync, screen share stream attachment, updater Application Control compatibility
 
 # Changelog
 
