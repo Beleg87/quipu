@@ -65,11 +65,13 @@ const (
 	MsgError     MessageType = "error"
 
 	// SFU signaling (server ↔ client)
-	MsgSFUJoin      MessageType = "sfu-join"      // client → server: join SFU room
-	MsgSFUOffer     MessageType = "sfu-offer"     // server → client: SFU offer
-	MsgSFUAnswer    MessageType = "sfu-answer"    // client → server: SFU answer
-	MsgSFUICE       MessageType = "sfu-ice"       // bidirectional: ICE candidates
-	MsgSFULeave     MessageType = "sfu-leave"     // client → server: leave SFU room
+	MsgSFUJoin        MessageType = "sfu-join"         // client → server: join SFU room
+	MsgSFUOffer       MessageType = "sfu-offer"        // server → client: SFU offer
+	MsgSFUAnswer      MessageType = "sfu-answer"       // client → server: SFU answer
+	MsgSFUICE         MessageType = "sfu-ice"          // bidirectional: ICE candidates
+	MsgSFULeave       MessageType = "sfu-leave"        // client → server: leave SFU room
+	MsgSFUScreenStart MessageType = "sfu-screen-start" // client → server → all: peer started sharing
+	MsgSFUScreenStop  MessageType = "sfu-screen-stop"  // client → server → all: peer stopped sharing
 )
 
 type Message struct {
@@ -538,6 +540,15 @@ func (p *Peer) readPump(h *Hub) {
 				sfuRoom.Leave(p.fingerprint)
 				h.sfuMgr.GC(payload.Channel)
 			}
+
+		case MsgSFUScreenStart, MsgSFUScreenStop:
+			// Broadcast to all peers in the room so they know who is sharing
+			if p.room == "" {
+				continue
+			}
+			msg.From = p.fingerprint
+			fwd, _ := json.Marshal(msg)
+			h.room(p.room).broadcast(fwd, p.fingerprint)
 
 		// ── Existing signaling (unchanged) ────────────────────────────────────
 

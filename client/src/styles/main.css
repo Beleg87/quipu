@@ -358,3 +358,91 @@ input  { font: inherit; }
 }
 .cfg-select:focus { outline: none; border-color: var(--accent-hi); }
 .field-group { display: flex; flex-direction: column; gap: 0.5rem; }
+
+/* ── Screen share button in voice bar ── */
+.btn-share {
+  background: none; border: none; color: var(--muted);
+  font-size: 1rem; cursor: pointer; padding: 0 0.25rem;
+  line-height: 1; transition: color 0.15s;
+}
+.btn-share:hover { color: var(--text); }
+.btn-share.sharing { color: #4caf50; animation: pulse-speak 1s ease-in-out infinite alternate; }
+
+/* ── Quality picker modal ── */
+.share-picker-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+  display: flex; align-items: center; justify-content: center; z-index: 1000;
+}
+.share-picker-box {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 1.75rem 2rem;
+  width: 380px; max-width: 95vw;
+}
+.share-picker-box h2 { font-size: 1rem; margin-bottom: 0.4rem; }
+.quality-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 0.4rem; margin: 1rem 0;
+}
+.quality-btn {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--muted);
+  font-size: 0.78rem; padding: 0.45rem 0.3rem;
+  cursor: pointer; transition: all 0.15s; font-family: inherit;
+}
+.quality-btn:hover { border-color: var(--accent-hi); color: var(--text); }
+.quality-btn.selected { border-color: var(--accent-hi); background: var(--accent-dim); color: var(--text); }
+.share-picker-actions {
+  display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem;
+}
+
+/* ── Screen grid ── */
+.screen-grid {
+  display: flex; flex-direction: column;
+  height: 100%; background: #0a0a0a; overflow: hidden;
+}
+
+/* Grid mode — tiles in a responsive grid */
+.screen-grid.grid-mode {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr));
+  grid-template-rows: auto;
+  gap: 4px; padding: 4px; align-content: start;
+}
+
+/* Focused mode — one tile fills everything */
+.screen-grid.focused-mode { display: flex; }
+.screen-grid.focused-mode .screen-tile.hidden { display: none; }
+.screen-grid.focused-mode .screen-tile.focused { flex: 1; }
+
+.screen-tile {
+  position: relative; background: #111;
+  border-radius: 4px; overflow: hidden;
+  display: flex; flex-direction: column;
+  min-height: 180px;
+}
+
+.screen-tile-header {
+  display: flex; align-items: center; gap: 0.4rem;
+  padding: 0.3rem 0.5rem;
+  background: rgba(0,0,0,0.6);
+  font-size: 0.75rem;
+  position: absolute; top: 0; left: 0; right: 0;
+  z-index: 2; opacity: 0; transition: opacity 0.2s;
+}
+.screen-tile:hover .screen-tile-header { opacity: 1; }
+
+.screen-tile-label { flex: 1; color: #eee; font-size: 0.72rem; }
+
+.focus-btn, .stop-share-btn {
+  background: rgba(255,255,255,0.12); border: none;
+  color: #eee; font-size: 0.72rem; padding: 0.15rem 0.35rem;
+  border-radius: 3px; cursor: pointer; font-family: inherit;
+}
+.focus-btn:hover { background: rgba(255,255,255,0.25); }
+.stop-share-btn { background: rgba(229,57,53,0.7); }
+.stop-share-btn:hover { background: rgba(229,57,53,0.9); }
+
+.screen-video {
+  width: 100%; height: 100%; object-fit: contain;
+  flex: 1; display: block; background: #000;
+}

@@ -387,6 +387,7 @@ function buildShell(version: string): string {
           </div>
           <div class="voice-status" id="voice-status" style="display:none">
             <span id="voice-status-label"></span>
+            <button class="btn-share" id="screen-share-btn" title="Share screen">⬡</button>
             <button class="voice-disconnect-btn" id="voice-leave-btn" title="Leave voice">&#x2715;</button>
           </div>
         </div>
@@ -416,6 +417,7 @@ function setupSidebar() {
   document.getElementById("add-text-ch-btn")?.addEventListener("click",  addTextChannel);
   document.getElementById("add-voice-ch-btn")?.addEventListener("click", addVoiceChannel);
   document.getElementById("voice-leave-btn")?.addEventListener("click",  leaveVoice);
+  document.getElementById("screen-share-btn")?.addEventListener("click", showSharePicker);
 }
 
 function renderSidebar() {
@@ -605,7 +607,9 @@ function addVoiceChannel() {
 
 // ── Text view ─────────────────────────────────────────────────────────────────
 
-function showText(ch: string) {
+function showText(ch: string, force = false) {
+  // Don't switch away from screen grid unless forced or no screens active
+  if (!force && activeScreens.size > 0) return;
   state.activeText = ch;
   // Clear unread badge
   const badge = document.getElementById(`unread-${ch}`);
@@ -1133,7 +1137,9 @@ async function onSignalingMessage(msg: any) {
     case "candidate":  onRtcCandidate(msg);     break;
     // SFU messages come back from server as JSON objects in the WS stream
     case "sfu-offer":
-    case "sfu-ice":    handleSFUMessage(msg);   break;
+    case "sfu-ice":       handleSFUMessage(msg);        break;
+    case "sfu-screen-start": onRemoteScreenStart(msg);  break;
+    case "sfu-screen-stop":  onRemoteScreenStop(msg);   break;
   }
 }
 
@@ -1241,9 +1247,17 @@ function showOverlay(title: string, body: string, permanent: boolean) {
 function onPeerJoined(fp: string) {
   if (!fp || fp === state.fingerprint) return;
   if (!state.peers.has(fp)) state.peers.set(fp, { fp, pc: null as any, muted: false });
-  if (state.activeVoice) voicePeers.add(fp);
+  // Do NOT add to voicePeers here — voice membership is tracked via __voice-join broadcasts only
   renderSidebar();
   broadcastNickname(); // make sure new peer gets our nickname
+  // Tell the new peer which voice channel we're in (if any) so their sidebar is accurate
+  if (state.activeVoice && state.connected) {
+    invoke("send_chat", {
+      text: `__voice-join:${state.activeVoice}`,
+      fingerprint: state.fingerprint,
+      room: "quipu-main",
+    }).catch(() => {});
+  }
   const st = document.getElementById("text-status");
   if (st) st.textContent = `${state.peers.size} peer(s) connected`;
   if (state.connected && state.myNickname) broadcastNickname();
@@ -1262,6 +1276,7 @@ function onPeerLeft(fp: string) {
 }
 
 function onChatMessage(msg: any) {
+  // (screen-start/stop handled via sfu-screen-start/stop message types)
   // Voice join broadcast — track which channel a peer is in
   if (msg.payload?.text?.startsWith("__voice-join:")) {
     const ch = msg.payload.text.replace("__voice-join:", "");
@@ -1321,6 +1336,27 @@ function onChatMessage(msg: any) {
 let voiceMode: "sfu" | "p2p" = "sfu";
 let sfuPc: RTCPeerConnection | null = null;
 
+// ── Screen share state ────────────────────────────────────────────────────────
+let screenStream:  MediaStream | null = null;
+let screenSender:  RTCRtpSender | null = null;
+let focusedScreen: string | null = null; // fp of focused screen, null = grid
+
+// Quality presets: [label, width, height, fps]
+const QUALITY_PRESETS: [string, number, number, number][] = [
+  ["Auto",      0,    0,    0  ],
+  ["480p 30",   854,  480,  30 ],
+  ["720p 30",   1280, 720,  30 ],
+  ["720p 60",   1280, 720,  60 ],
+  ["1080p 30",  1920, 1080, 30 ],
+  ["1080p 60",  1920, 1080, 60 ],
+  ["1080p 120", 1920, 1080, 120],
+  ["1440p 60",  2560, 1440, 60 ],
+  ["1440p 120", 2560, 1440, 120],
+];
+
+// Active screen shares: fp → { stream, label }
+const activeScreens: Map<string, { stream: MediaStream; label: string }> = new Map();
+
 async function toggleVoiceChannel(ch: string) {
   // Auto-connect to signaling if needed
   if (!state.connected) {
@@ -1347,7 +1383,10 @@ async function toggleVoiceChannel(ch: string) {
 
   state.activeVoice = ch;
   voicePeers.clear();
-  state.peers.forEach((_, fp) => voicePeers.add(fp));
+  // Seed voicePeers from channelPeers (who we know is already in this channel)
+  // NOT from state.peers (which includes everyone connected to signaling, not just voice)
+  const existingInChannel = channelPeers.get(ch) ?? new Set<string>();
+  existingInChannel.forEach(fp => { if (fp !== state.fingerprint) voicePeers.add(fp); });
   // Track ourselves in this channel
   if (!channelPeers.has(ch)) channelPeers.set(ch, new Set());
   channelPeers.get(ch)!.add(state.fingerprint);
@@ -1386,12 +1425,20 @@ function trySFU(channel: string): Promise<boolean> {
     localStream?.getTracks().forEach(track => { localStream && pc.addTrack(track, localStream); });
 
     pc.ontrack = (ev) => {
-      let container = document.getElementById("audio-container");
-      if (!container) { container = document.createElement("div"); container.id = "audio-container"; document.body.appendChild(container); }
-      const sid = ev.streams[0]?.id || "sfu";
-      let audio = document.getElementById(`audio-sfu-${sid}`) as HTMLAudioElement | null;
-      if (!audio) { audio = document.createElement("audio"); audio.id = `audio-sfu-${sid}`; audio.autoplay = true; container.appendChild(audio); }
-      audio.srcObject = ev.streams[0];
+      const track = ev.track;
+      if (track.kind === "audio") {
+        // Audio — attach to hidden audio element
+        let container = document.getElementById("audio-container");
+        if (!container) { container = document.createElement("div"); container.id = "audio-container"; document.body.appendChild(container); }
+        const sid = ev.streams[0]?.id || "sfu";
+        let audio = document.getElementById(`audio-sfu-${sid}`) as HTMLAudioElement | null;
+        if (!audio) { audio = document.createElement("audio"); audio.id = `audio-sfu-${sid}`; audio.autoplay = true; container.appendChild(audio); }
+        audio.srcObject = ev.streams[0];
+      } else if (track.kind === "video") {
+        // Video — screen share track arriving from SFU
+        // The fp is encoded in the track label by the sender via sfu-screen-start
+        onSFUVideoTrack(ev.streams[0], track);
+      }
     };
 
     pc.onicecandidate = (ev) => {
@@ -1473,6 +1520,227 @@ async function handleSFUMessage(msg: any) {
   }
 }
 
+
+// ── Screen share ──────────────────────────────────────────────────────────────
+
+function showSharePicker() {
+  if (!sfuPc || voiceMode !== "sfu") {
+    alert("Screen share requires SFU connection."); return;
+  }
+  // If already sharing, stop instead
+  if (screenStream) { stopScreenShare(); return; }
+
+  const overlay = document.createElement("div");
+  overlay.id = "share-picker-overlay";
+  overlay.className = "share-picker-overlay";
+  overlay.innerHTML = `
+    <div class="share-picker-box">
+      <h2>Share your screen</h2>
+      <p class="settings-hint">Choose quality. Your GPU encodes — higher quality uses more upload.</p>
+      <div class="quality-grid">
+        ${QUALITY_PRESETS.map(([label], i) => `
+          <button class="quality-btn ${i === 0 ? "selected" : ""}" data-idx="${i}">${label}</button>
+        `).join("")}
+      </div>
+      <div class="share-picker-actions">
+        <button class="btn-secondary" id="share-cancel-btn">Cancel</button>
+        <button class="btn-primary"   id="share-start-btn">Start sharing</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  let selectedIdx = 0;
+  overlay.querySelectorAll(".quality-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      overlay.querySelectorAll(".quality-btn").forEach(b => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      selectedIdx = parseInt((btn as HTMLElement).dataset.idx!);
+    });
+  });
+  document.getElementById("share-cancel-btn")!.addEventListener("click", () => overlay.remove());
+  document.getElementById("share-start-btn")!.addEventListener("click", async () => {
+    overlay.remove();
+    await startScreenShare(selectedIdx);
+  });
+}
+
+async function startScreenShare(presetIdx: number) {
+  const [, w, h, fps] = QUALITY_PRESETS[presetIdx];
+  const videoConstraints: MediaTrackConstraints = {};
+  if (w > 0) { videoConstraints.width = { ideal: w }; videoConstraints.height = { ideal: h }; }
+  if (fps > 0) { videoConstraints.frameRate = { ideal: fps, max: fps }; }
+
+  try {
+    screenStream = await (navigator.mediaDevices as any).getDisplayMedia({
+      video: w > 0 ? videoConstraints : true,
+      audio: false, // system audio causes echo — keep off
+      selfBrowserSurface: "exclude",
+    });
+  } catch (e: any) {
+    if (e.name !== "NotAllowedError") alert(`Screen capture failed: ${e.message}`);
+    return;
+  }
+
+  // Add video track to the SFU peer connection
+  const videoTrack = screenStream.getVideoTracks()[0];
+  if (!videoTrack || !sfuPc) { screenStream.getTracks().forEach(t => t.stop()); screenStream = null; return; }
+
+  screenSender = sfuPc.addTrack(videoTrack, screenStream);
+
+  // Show our own screen in the grid immediately
+  activeScreens.set(state.fingerprint, {
+    stream: screenStream,
+    label:  state.myNickname || state.fingerprint.slice(0, 8),
+  });
+  renderScreenGrid();
+  updateShareButton(true);
+
+  // Broadcast to peers that we started sharing
+  invoke("send_sfu", {
+    action: "sfu-screen-start",
+    payload: { label: state.myNickname || state.fingerprint.slice(0, 8) },
+    fingerprint: state.fingerprint,
+  }).catch(() => {});
+
+  // Auto-stop when user clicks "Stop sharing" in browser UI
+  videoTrack.addEventListener("ended", () => stopScreenShare());
+}
+
+function stopScreenShare() {
+  screenStream?.getTracks().forEach(t => t.stop());
+  screenStream = null;
+  if (sfuPc && screenSender) {
+    try { sfuPc.removeTrack(screenSender); } catch {}
+  }
+  screenSender = null;
+  activeScreens.delete(state.fingerprint);
+  renderScreenGrid();
+  updateShareButton(false);
+  invoke("send_sfu", {
+    action: "sfu-screen-stop",
+    payload: {},
+    fingerprint: state.fingerprint,
+  }).catch(() => {});
+}
+
+function updateShareButton(sharing: boolean) {
+  const btn = document.getElementById("screen-share-btn");
+  if (!btn) return;
+  btn.textContent = sharing ? "⬡" : "⬡";
+  btn.classList.toggle("sharing", sharing);
+  btn.title = sharing ? "Stop sharing" : "Share screen";
+}
+
+// Called when we receive a video track from the SFU (someone else sharing)
+function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
+  // We don't know the owner fp yet — we'll get it from sfu-screen-start broadcast
+  // Store by stream ID temporarily, will be updated when broadcast arrives
+  const tempKey = `__stream:${stream.id}`;
+  activeScreens.set(tempKey, { stream, label: "..." });
+  renderScreenGrid();
+  track.addEventListener("ended", () => {
+    activeScreens.delete(tempKey);
+    renderScreenGrid();
+  });
+}
+
+function onRemoteScreenStart(msg: any) {
+  const fp   = msg.from ?? msg.payload?.from;
+  const label = msg.payload?.label ?? displayName(fp);
+  // Find the temp entry and re-key it to the fp
+  for (const [key, val] of activeScreens) {
+    if (key.startsWith("__stream:")) {
+      activeScreens.delete(key);
+      activeScreens.set(fp, { ...val, label });
+      break;
+    }
+  }
+  // If not found yet (broadcast arrived before track), pre-register
+  if (!activeScreens.has(fp)) {
+    // Will be populated when onSFUVideoTrack fires
+  }
+  renderScreenGrid();
+}
+
+function onRemoteScreenStop(msg: any) {
+  const fp = msg.from ?? msg.payload?.from;
+  activeScreens.delete(fp);
+  if (focusedScreen === fp) focusedScreen = null;
+  renderScreenGrid();
+}
+
+// ── Screen grid renderer ──────────────────────────────────────────────────────
+
+function renderScreenGrid() {
+  const main = document.getElementById("main-content");
+  if (!main) return;
+
+  if (activeScreens.size === 0) {
+    // No screens — restore last text view
+    if (state.activeText) showText(state.activeText, true);
+    return;
+  }
+
+  // Build screen grid HTML
+  const focused = focusedScreen && activeScreens.has(focusedScreen) ? focusedScreen : null;
+
+  main.innerHTML = `
+    <div class="screen-grid ${focused ? "focused-mode" : "grid-mode"}" id="screen-grid">
+      ${[...activeScreens.entries()].map(([fp, { label }]) => `
+        <div class="screen-tile ${focused === fp ? "focused" : focused ? "hidden" : ""}"
+             data-fp="${fp}" id="tile-${fp}">
+          <div class="screen-tile-header">
+            <span class="screen-tile-label">${escapeHtml(label)}</span>
+            ${fp === state.fingerprint ? `<button class="stop-share-btn" title="Stop sharing">■ Stop</button>` : ""}
+            <button class="focus-btn" title="${focused === fp ? "Back to grid" : "Focus"}">
+              ${focused === fp ? "⊟" : "⊞"}
+            </button>
+          </div>
+          <video class="screen-video" id="vid-${fp}" autoplay playsinline muted></video>
+        </div>
+      `).join("")}
+    </div>`;
+
+  // Attach streams to video elements
+  activeScreens.forEach(({ stream }, fp) => {
+    const vid = document.getElementById(`vid-${fp}`) as HTMLVideoElement | null;
+    if (vid) vid.srcObject = stream;
+  });
+
+  // Wire focus buttons
+  main.querySelectorAll(".focus-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const fp = (btn.closest(".screen-tile") as HTMLElement)?.dataset.fp!;
+      focusedScreen = focusedScreen === fp ? null : fp;
+      renderScreenGrid();
+    });
+  });
+
+  // Wire stop button
+  main.querySelectorAll(".stop-share-btn").forEach(btn => {
+    btn.addEventListener("click", () => stopScreenShare());
+  });
+
+  // Click tile body to focus/unfocus
+  main.querySelectorAll(".screen-tile").forEach(tile => {
+    tile.addEventListener("dblclick", () => {
+      const fp = (tile as HTMLElement).dataset.fp!;
+      focusedScreen = focusedScreen === fp ? null : fp;
+      renderScreenGrid();
+    });
+  });
+
+  // Escape to unfocus
+  const escHandler = (e: KeyboardEvent) => {
+    if (e.key === "Escape" && focusedScreen) {
+      focusedScreen = null;
+      renderScreenGrid();
+    }
+  };
+  document.removeEventListener("keydown", escHandler);
+  document.addEventListener("keydown", escHandler);
+}
+
 function leaveVoice() {
   const ch = state.activeVoice;
   state.activeVoice = null;
@@ -1494,6 +1762,8 @@ function leaveVoice() {
   }
   localStream?.getTracks().forEach(t => t.stop());
   localStream = null;
+  // Stop screen share if active
+  if (screenStream) stopScreenShare();
   if (sfuPc) {
     if (ch) {
       invoke("send_sfu", {
@@ -1505,6 +1775,8 @@ function leaveVoice() {
     sfuPc.close();
     sfuPc = null;
   }
+  activeScreens.clear();
+  focusedScreen = null;
   state.peers.forEach(p => { p.pc?.close(); state.peers.set(p.fp, { ...p, pc: null as any }); });
   document.getElementById("audio-container")?.remove();
   const voiceStatus = document.getElementById("voice-status");
@@ -1575,7 +1847,8 @@ async function onRtcOffer(msg: any) {
   };
   pc.onconnectionstatechange = () => renderSidebar();
   state.peers.set(msg.from, { fp: msg.from, pc, muted: false });
-  if (state.activeVoice) voicePeers.add(msg.from);
+  // In P2P mode, receiving an offer means they're in our voice channel
+  if (state.activeVoice && voiceMode === "p2p") voicePeers.add(msg.from);
   await pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);

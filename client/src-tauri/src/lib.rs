@@ -116,7 +116,7 @@ async fn send_moderation(
 
 #[tauri::command]
 async fn send_sfu(
-    action:      String,  // "sfu-join" | "sfu-answer" | "sfu-ice" | "sfu-leave"
+    action:      String,  // "sfu-join" | "sfu-answer" | "sfu-ice" | "sfu-leave" | "sfu-screen-start" | "sfu-screen-stop"
     payload:     serde_json::Value,
     fingerprint: String,
     state:       State<'_, signaling::SignalingHandle>,

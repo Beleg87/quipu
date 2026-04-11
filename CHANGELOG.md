@@ -1,6 +1,6 @@
-## [0.1.11] - 2026-04-11
+## [0.1.12] - 2026-04-11
 
-SFU: fix renegotiation race, ICE candidate queuing, per-peer signaling
+Screen share, fix voice peer visibility (ghost peers, missing peers for late joiners)
 
 # Changelog
 
