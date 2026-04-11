@@ -1,6 +1,6 @@
-## [0.1.19] - 2026-04-11
+## [0.1.20] - 2026-04-11
 
-Server log file, fix screen share empty stream on renegotiation, improve share UX
+Fix screen share video track delivery, auto-connect URL loading, SFU video transceiver pre-allocation
 
 # Changelog
 

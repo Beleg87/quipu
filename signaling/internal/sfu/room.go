@@ -96,12 +96,21 @@ func (r *Room) Join(fp string, ws SignalFunc) (*webrtc.SessionDescription, error
 
 	peer := &Peer{fp: fp, pc: pc, ws: ws}
 
-	// sendrecv: receive audio from client, send others' audio back
+	// sendrecv audio: receive mic from client, send others' audio back
 	if _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
 		Direction: webrtc.RTPTransceiverDirectionSendrecv,
 	}); err != nil {
 		pc.Close()
-		return nil, fmt.Errorf("AddTransceiverFromKind: %w", err)
+		return nil, fmt.Errorf("AddTransceiverFromKind audio: %w", err)
+	}
+
+	// sendrecv video: ready to receive screen share, send others' screens back
+	// Adding this upfront avoids needing a full renegotiation when sharing starts mid-session
+	if _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionSendrecv,
+	}); err != nil {
+		pc.Close()
+		return nil, fmt.Errorf("AddTransceiverFromKind video: %w", err)
 	}
 
 	// Trickle ICE → client

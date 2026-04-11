@@ -984,7 +984,15 @@ function prefillSettings() {
   const turnCfg  = document.getElementById("turn-config");
   const direct   = document.getElementById("ice-direct")    as HTMLInputElement | null;
   const relay    = document.getElementById("ice-relay")     as HTMLInputElement | null;
-  if (url)      url.value      = state.serverUrl;
+  if (url) {
+    url.value = state.serverUrl;
+    // If blank, try loading from saved config again
+    if (!state.serverUrl) {
+      invoke<{ server_url: string }>("load_config").then(cfg => {
+        if (cfg.server_url) { state.serverUrl = cfg.server_url; url.value = cfg.server_url; }
+      }).catch(() => {});
+    }
+  }
   if (nick)     nick.value     = state.myNickname;
   if (fp)       fp.value       = state.fingerprint;
   if (turnUrl)  turnUrl.value  = state.turnUrl;
@@ -1679,29 +1687,28 @@ const pendingScreenMeta: Map<string, string> = new Map(); // fp → label
 
 // Called when we receive a video track from the SFU (someone else sharing)
 function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
-  console.log("[SFU] onSFUVideoTrack called, stream:", stream.id, "pending meta:", [...pendingScreenMeta.entries()]);
-  // Try to match against any pending sfu-screen-start metadata by checking all pending fps
-  // The track stream ID isn't tied to the fp, so we use arrival order as a heuristic
-  // The sfu-screen-start broadcast updates the label once it arrives
+  console.log("[SFU] video track arrived, stream:", stream.id, "pending:", [...pendingScreenMeta.entries()]);
+  // Always store by stream ID initially — __screen-start broadcast will re-key to fp
   const streamKey = `__stream:${stream.id}`;
-  // Check if we have pending metadata that arrived before the track
-  let matched = "";
-  for (const [fp] of pendingScreenMeta) {
-    if (!activeScreens.has(fp)) { matched = fp; break; }
-  }
-  const key   = matched || streamKey;
-  const label = matched ? (pendingScreenMeta.get(matched) || displayName(matched)) : "Sharing...";
-  if (matched) pendingScreenMeta.delete(matched);
-
-  activeScreens.set(key, { stream, label });
-  renderScreenGrid(); // opens/updates the overlay automatically
-
-  track.addEventListener("ended", () => {
-    // Delete by stream key or fp key (whichever is current)
-    for (const [k, v] of activeScreens) {
-      if (v.stream === stream) { activeScreens.delete(k); break; }
+  // Check if there's exactly one pending entry to auto-match (unambiguous case)
+  const pendingEntries = [...pendingScreenMeta.entries()];
+  let label = "Sharing...";
+  let finalKey = streamKey;
+  if (pendingEntries.length === 1) {
+    const [fp, pendingLabel] = pendingEntries[0];
+    if (!activeScreens.has(fp)) {
+      finalKey = fp;
+      label = pendingLabel;
+      pendingScreenMeta.delete(fp);
+      console.log("[SFU] matched stream to fp:", fp);
     }
-    if (focusedScreen === key) focusedScreen = null;
+  }
+  activeScreens.set(finalKey, { stream, label });
+  renderScreenGrid();
+  track.addEventListener("ended", () => {
+    for (const [k, v] of activeScreens) {
+      if (v.stream === stream) { activeScreens.delete(k); if (focusedScreen === k) focusedScreen = null; break; }
+    }
     renderScreenGrid();
   });
 }
@@ -1709,22 +1716,29 @@ function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
 function onRemoteScreenStart(msg: any) {
   const fp    = msg.from ?? msg.payload?.from;
   const label = msg.payload?.label ?? displayName(fp);
+  console.log("[SFU] screen-start from:", fp, "label:", label, "activeScreens:", [...activeScreens.keys()]);
+  // Find any __stream: entry not yet keyed to a real fp, re-key it
   const streamKey = [...activeScreens.keys()].find(k => k.startsWith("__stream:"));
   if (streamKey) {
     const val = activeScreens.get(streamKey)!;
     activeScreens.delete(streamKey);
     activeScreens.set(fp, { ...val, label });
-    renderScreenGrid(); // re-render overlay with correct label
-    // Re-attach stream after DOM is rebuilt
+    renderScreenGrid();
     requestAnimationFrame(() => {
       const vid = document.getElementById(`vid-${fp}`) as HTMLVideoElement | null;
       if (vid && vid.srcObject !== val.stream) vid.srcObject = val.stream;
     });
+  } else if (activeScreens.has(fp)) {
+    // Already keyed (track arrived first with correct fp) — just update label
+    const val = activeScreens.get(fp)!;
+    activeScreens.set(fp, { ...val, label });
+    renderScreenGrid();
   } else {
+    // Track hasn't arrived yet — store metadata
     pendingScreenMeta.set(fp, label);
-    // Show notification in sidebar — overlay will open when track arrives
+    console.log("[SFU] stored pending meta for:", fp);
   }
-  renderSidebar(); // update sidebar bar immediately
+  renderSidebar();
 }
 
 function onRemoteScreenStop(msg: any) {
