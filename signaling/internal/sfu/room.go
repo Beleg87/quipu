@@ -27,8 +27,9 @@ type Peer struct {
 	pc          *webrtc.PeerConnection
 	ws          SignalFunc
 	mu          sync.Mutex // serialises renegotiation for this peer
-	pendingICE  []webrtc.ICECandidateInit // ICE candidates queued before answer
-	remoteSet   bool                       // true once SetRemoteDescription has been called
+	pendingICE  []webrtc.ICECandidateInit
+	remoteSet   bool
+	regenTimer  *time.Timer // debounce renegotiation
 }
 
 // Room holds all peers and local tracks for a single voice channel.
@@ -177,7 +178,7 @@ func (r *Room) Join(fp string, ws SignalFunc) (*webrtc.SessionDescription, error
 			}
 			existPeer.mu.Lock()
 			r.mu.Lock()
-			_ = r.renegotiate(existPeer)
+			r.scheduleRenegotiate(existPeer)
 			r.mu.Unlock()
 			existPeer.mu.Unlock()
 		}
@@ -305,7 +306,7 @@ func (r *Room) registerTrack(sourceFp string, remote *webrtc.TrackRemote) *webrt
 			p.mu.Unlock()
 			continue
 		}
-		_ = r.renegotiate(p)
+		r.scheduleRenegotiate(p) // debounced — won't fire until 150ms after last call
 		r.mu.Unlock()
 		p.mu.Unlock()
 	}
@@ -339,6 +340,23 @@ func (r *Room) forwardRTP(remote *webrtc.TrackRemote, local *webrtc.TrackLocalSt
 }
 
 // ── Renegotiation ─────────────────────────────────────────────────────────────
+
+// scheduleRenegotiate debounces renegotiation for a peer — multiple rapid track
+// additions (e.g. audio + video arriving together) collapse into one offer.
+// Caller must hold peer.mu and r.mu.
+func (r *Room) scheduleRenegotiate(peer *Peer) {
+	if peer.regenTimer != nil {
+		peer.regenTimer.Stop()
+	}
+	p := peer
+	peer.regenTimer = time.AfterFunc(150*time.Millisecond, func() {
+		p.mu.Lock()
+		r.mu.Lock()
+		_ = r.renegotiate(p)
+		r.mu.Unlock()
+		p.mu.Unlock()
+	})
+}
 
 // renegotiate sends a new offer to peer reflecting current track state.
 // Caller must hold both peer.mu and r.mu.

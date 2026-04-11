@@ -1,6 +1,6 @@
-## [0.1.13] - 2026-04-11
+## [0.1.14] - 2026-04-11
 
-Fix voice peer list visibility, screen share grid, audio device persistence
+Fix: hide internal messages from chat, screen share visible to all, debounce SFU renegotiation glitch
 
 # Changelog
 

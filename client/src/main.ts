@@ -1168,7 +1168,7 @@ function onHistory(msg: any) {
   const items: Array<{ from: string; payload: { text: string }; at: number }> = msg.payload ?? [];
   items.forEach(item => {
     const text = item.payload?.text ?? "";
-    if (!text || text.startsWith("__nick:")) return;
+    if (!text || isInternalMessage(text)) return;
     let ch   = "general";
     let body = text;
     if (text.startsWith("__ch:")) {
@@ -1296,7 +1296,17 @@ function onPeerLeft(fp: string) {
 }
 
 function onChatMessage(msg: any) {
-  // (screen-start/stop handled via sfu-screen-start/stop message types)
+  const msgText = msg.payload?.text ?? "";
+  // Screen share broadcasts
+  if (msgText.startsWith("__screen-start:")) {
+    const label = msgText.replace("__screen-start:", "");
+    onRemoteScreenStart({ from: msg.from, payload: { label } });
+    return;
+  }
+  if (msgText === "__screen-stop") {
+    onRemoteScreenStop({ from: msg.from });
+    return;
+  }
   // Voice join broadcast — track which channel a peer is in
   if (msg.payload?.text?.startsWith("__voice-join:")) {
     const ch = msg.payload.text.replace("__voice-join:", "");
@@ -1623,11 +1633,11 @@ async function startScreenShare(presetIdx: number) {
   renderScreenGrid();
   updateShareButton(true);
 
-  // Broadcast to peers that we started sharing
-  invoke("send_sfu", {
-    action: "sfu-screen-start",
-    payload: { label: state.myNickname || state.fingerprint.slice(0, 8) },
+  // Broadcast via signaling hub so ALL peers in the room get notified (not just SFU peers)
+  invoke("send_chat", {
+    text: `__screen-start:${state.myNickname || state.fingerprint.slice(0, 8)}`,
     fingerprint: state.fingerprint,
+    room: "quipu-main",
   }).catch(() => {});
 
   // Auto-stop when user clicks "Stop sharing" in browser UI
@@ -1644,10 +1654,10 @@ function stopScreenShare() {
   activeScreens.delete(state.fingerprint);
   renderScreenGrid();
   updateShareButton(false);
-  invoke("send_sfu", {
-    action: "sfu-screen-stop",
-    payload: {},
+  invoke("send_chat", {
+    text: "__screen-stop",
     fingerprint: state.fingerprint,
+    room: "quipu-main",
   }).catch(() => {});
 }
 
