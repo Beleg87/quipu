@@ -1,6 +1,6 @@
-## [0.1.16] - 2026-04-11
+## [0.1.17] - 2026-04-11
 
-Fix: hide internal msgs from chat, screen share navigation bar, stop server storing internal messages
+Fix server crash: nil guards in SFU renegotiation and keyframe ticker
 
 # Changelog
 

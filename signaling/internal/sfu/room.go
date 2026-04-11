@@ -59,6 +59,9 @@ func (r *Room) keyframeTicker() {
 	for range t.C {
 		r.mu.Lock()
 		for _, p := range r.peers {
+			if p == nil || p.pc == nil {
+				continue
+			}
 			for _, recv := range p.pc.GetReceivers() {
 				if recv.Track() == nil {
 					continue
@@ -361,6 +364,9 @@ func (r *Room) scheduleRenegotiate(peer *Peer) {
 // renegotiate sends a new offer to peer reflecting current track state.
 // Caller must hold both peer.mu and r.mu.
 func (r *Room) renegotiate(peer *Peer) error {
+	if peer == nil || peer.pc == nil {
+		return nil
+	}
 	// Only renegotiate if stable — otherwise wait for client to finish
 	if peer.pc.SignalingState() != webrtc.SignalingStateStable {
 		return nil
