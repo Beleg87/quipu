@@ -1,6 +1,6 @@
-## [0.1.25] - 2026-04-11
+## [0.1.26] - 2026-04-12
 
-Sound effects, fix screen share on reconnect
+Fix Simulcast error, screen share on channel switch, sounds, volume in SFU, peer count
 
 # Changelog
 

@@ -103,15 +103,9 @@ func (r *Room) Join(fp string, ws SignalFunc) (*webrtc.SessionDescription, error
 		pc.Close()
 		return nil, fmt.Errorf("AddTransceiverFromKind audio: %w", err)
 	}
-
-	// sendrecv video: ready to receive screen share, send others' screens back
-	// Adding this upfront avoids needing a full renegotiation when sharing starts mid-session
-	if _, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
-		Direction: webrtc.RTPTransceiverDirectionSendrecv,
-	}); err != nil {
-		pc.Close()
-		return nil, fmt.Errorf("AddTransceiverFromKind video: %w", err)
-	}
+	// Note: we do NOT pre-add a video transceiver here.
+	// Doing so caused "Simulcast probing" errors when the client later added its screen share track.
+	// Instead, video transceivers are added on-demand when a screen share track arrives via registerTrack.
 
 	// Trickle ICE → client
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {

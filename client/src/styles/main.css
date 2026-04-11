@@ -514,7 +514,7 @@ input  { font: inherit; }
   width: 400px;
   display: flex; flex-direction: row;
   z-index: 400;
-  pointer-events: none; /* let clicks through by default */
+  /* pointer-events: all — drawer blocks clicks intentionally */
 }
 .screen-drawer.focused-mode { width: 600px; }
 
@@ -530,7 +530,7 @@ input  { font: inherit; }
   border-right: none;
   border-radius: 6px 0 0 6px;
   color: var(--muted); font-size: 0.68rem;
-  cursor: pointer; pointer-events: all;
+  cursor: pointer;
   writing-mode: vertical-rl;
   text-orientation: mixed;
   padding: 0.5rem 0.2rem;
@@ -545,7 +545,6 @@ input  { font: inherit; }
   flex: 1; display: flex; flex-direction: column;
   background: #0d0d0d;
   border-left: 1px solid var(--border);
-  pointer-events: all;
   box-shadow: -4px 0 24px rgba(0,0,0,0.5);
 }
 
@@ -575,16 +574,15 @@ input  { font: inherit; }
   position: relative; background: #111;
   border-radius: 4px; overflow: hidden;
   display: flex; flex-direction: column;
-  min-height: 180px; flex-shrink: 0;
+  min-height: 200px; flex-shrink: 0;
 }
 .screen-tile-header {
   display: flex; align-items: center; gap: 0.3rem;
-  padding: 0.2rem 0.4rem;
-  background: rgba(0,0,0,0.75);
-  position: absolute; top: 0; left: 0; right: 0;
-  z-index: 2; opacity: 0; transition: opacity 0.15s;
+  padding: 0.3rem 0.5rem;
+  background: rgba(0,0,0,0.85);
+  z-index: 2;
+  flex-shrink: 0;
 }
-.screen-tile:hover .screen-tile-header { opacity: 1; }
 .screen-tile-label { flex: 1; color: #eee; font-size: 0.7rem; }
 .focus-btn, .stop-share-btn {
   background: rgba(255,255,255,0.15); border: none;
@@ -596,5 +594,6 @@ input  { font: inherit; }
 .stop-share-btn:hover { background: rgba(220,50,50,0.9); }
 .screen-video {
   width: 100%; flex: 1; display: block;
-  object-fit: contain; background: #000; min-height: 160px;
+  object-fit: contain; background: #000; min-height: 0;
+  cursor: pointer;
 }

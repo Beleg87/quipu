@@ -94,6 +94,8 @@ let speakingTimer: ReturnType<typeof setInterval> | null = null;
 
 // Per-peer volume (0–200, where 100 = normal)
 const peerVolumes: Map<string, number> = new Map();
+// fp → audio element (covers both SFU and P2P modes)
+const peerAudioEls: Map<string, HTMLAudioElement> = new Map();
 
 function getPeerVolume(fp: string): number {
   return peerVolumes.get(fp) ?? 100;
@@ -101,9 +103,9 @@ function getPeerVolume(fp: string): number {
 
 function setPeerVolume(fp: string, vol: number) {
   peerVolumes.set(fp, vol);
-  const audio = document.getElementById(`audio-${fp}`) as HTMLAudioElement | null;
+  // Look up audio element by fp (works for both SFU and P2P modes)
+  const audio = peerAudioEls.get(fp) ?? document.getElementById(`audio-${fp}`) as HTMLAudioElement | null;
   if (audio) audio.volume = Math.min(vol / 100, 1.0);
-  // For >100% we use a GainNode if available — handled in applyVolumeBoost
   applyVolumeBoost(fp, vol);
 }
 
@@ -111,7 +113,7 @@ function setPeerVolume(fp: string, vol: number) {
 const gainNodes: Map<string, { ctx: AudioContext; gain: GainNode }> = new Map();
 
 function applyVolumeBoost(fp: string, vol: number) {
-  const audio = document.getElementById(`audio-${fp}`) as HTMLAudioElement | null;
+  const audio = peerAudioEls.get(fp) ?? document.getElementById(`audio-${fp}`) as HTMLAudioElement | null;
   if (!audio || !audio.srcObject) return;
   if (vol <= 100) {
     // Just use the audio element volume, no Web Audio needed
@@ -144,8 +146,21 @@ function getAudioCtx(): AudioContext {
   if (!audioCtx || audioCtx.state === "closed") {
     audioCtx = new AudioContext();
   }
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume().catch(() => {});
+  }
   return audioCtx;
 }
+
+// Unlock AudioContext on first user gesture (required by browsers)
+function unlockAudio() {
+  if (!audioCtx) audioCtx = new AudioContext();
+  if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+  document.removeEventListener("click", unlockAudio);
+  document.removeEventListener("keydown", unlockAudio);
+}
+document.addEventListener("click", unlockAudio, { once: true });
+document.addEventListener("keydown", unlockAudio, { once: true });
 
 function playTone(
   frequency: number,
@@ -1403,16 +1418,14 @@ function onChatMessage(msg: any) {
   // Voice join broadcast — track which channel a peer is in
   if (msg.payload?.text?.startsWith("__voice-join:")) {
     const ch = msg.payload.text.replace("__voice-join:", "");
-    // Remove from all channels first (they can only be in one)
     channelPeers.forEach(set => set.delete(msg.from));
     if (!channelPeers.has(ch)) channelPeers.set(ch, new Set());
     channelPeers.get(ch)!.add(msg.from);
-    // If they joined our active voice channel, add to voicePeers so they appear in sidebar
     if (ch === state.activeVoice) {
       voicePeers.add(msg.from);
-      // In SFU mode we don't need to create a P2P connection — SFU handles audio
-      // In P2P mode, the offer/answer exchange will happen via createOrGetPC
       if (voiceMode === "p2p") createOrGetPC(msg.from, false);
+      // Queue this fp for audio element association when their SFU track arrives
+      if (!pendingAudioFps.includes(msg.from)) pendingAudioFps.push(msg.from);
     }
     renderSidebar();
     return;
@@ -1535,8 +1548,15 @@ async function toggleVoiceChannel(ch: string) {
     voiceLabel.textContent = `\uD83D\uDD0A ${ch} \u00B7 SFU`;
     sounds.voiceJoin();
     broadcastNickname();
+    invoke("send_chat", {
+      text: `__voice-join:${ch}`,
+      fingerprint: state.fingerprint,
+      room: "quipu-main",
+    }).catch(() => {});
     renderSidebar();
     renderScreenGrid();
+    // Scan for any video tracks delivered in the initial join offer (e.g. active screen share)
+    setTimeout(() => checkForNewVideoTracks(), 800);
     return;
   }
 
@@ -1568,6 +1588,12 @@ function trySFU(channel: string): Promise<boolean> {
         let audio = document.getElementById(`audio-sfu-${sid}`) as HTMLAudioElement | null;
         if (!audio) { audio = document.createElement("audio"); audio.id = `audio-sfu-${sid}`; audio.autoplay = true; container.appendChild(audio); }
         audio.srcObject = stream;
+        // Associate this audio element with the next pending fp so volume control works
+        const pendingFp = pendingAudioFps.shift();
+        if (pendingFp) {
+          peerAudioEls.set(pendingFp, audio);
+          audio.volume = Math.min(getPeerVolume(pendingFp) / 100, 1.0);
+        }
       } else if (track.kind === "video") {
         console.log("[SFU] video track received:", track.id, "stream:", stream.id);
         onSFUVideoTrack(stream, track);
@@ -1766,6 +1792,8 @@ function updateShareButton(sharing: boolean) {
 
 // Pending screen-start metadata (broadcast may arrive before or after track)
 const pendingScreenMeta: Map<string, string> = new Map(); // fp → label
+// Queue of fps that recently joined voice (for audio element association)
+const pendingAudioFps: string[] = [];
 
 // Called when we receive a video track from the SFU (someone else sharing)
 function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
@@ -2019,22 +2047,20 @@ function renderScreenGrid() {
   document.addEventListener("keydown", escHandler);
 }
 
-// After renegotiation, scan for video tracks not yet shown.
-// Only runs if we know someone is sharing (pendingScreenMeta has entries or activeScreens has __stream: keys)
+// Scan receivers for live unmuted video tracks not yet shown.
+// Called after SFU connect and after renegotiation.
 function checkForNewVideoTracks() {
   if (!sfuPc) return;
-  const hasPending = pendingScreenMeta.size > 0;
-  const hasUnkeyed = [...activeScreens.keys()].some(k => k.startsWith("__stream:"));
-  if (!hasPending && !hasUnkeyed) return; // no one is known to be sharing
   for (const recv of sfuPc.getReceivers()) {
     const track = recv.track;
     if (!track || track.kind !== "video" || track.readyState !== "live") continue;
+    if (track.muted) continue; // placeholder transceiver, no real content
     let found = false;
     activeScreens.forEach(({ stream }) => {
       if (stream.getVideoTracks().some(t => t.id === track.id)) found = true;
     });
     if (!found) {
-      console.log("[SFU] receiver scan found video track:", track.id, "muted:", track.muted);
+      console.log("[SFU] found unmuted video track:", track.id);
       const stream = new MediaStream([track]);
       onSFUVideoTrack(stream, track);
     }
