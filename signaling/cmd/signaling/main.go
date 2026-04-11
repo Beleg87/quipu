@@ -13,6 +13,7 @@ import (
 	"github.com/quipu-app/quipu/signaling/internal/sfu"
 	"github.com/quipu-app/quipu/signaling/internal/updater"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Version is set at build time via -ldflags. Falls back to "dev".
@@ -864,17 +865,41 @@ func (h *Hub) healthHandler(w http.ResponseWriter, _ *http.Request) {
 func main() {
 	cfg := configFromFlags()
 
+	// ── Logger: write to both console and quipu-server.log ───────────────────────
+	logFile, fileErr := os.OpenFile("quipu-server.log",
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+
 	var log *zap.Logger
 	var err error
-	if os.Getenv("QUIPU_ENV") == "production" {
-		log, err = zap.NewProduction()
+	if fileErr == nil {
+		// Tee output: console (colored dev) + log file (JSON)
+		consoleCfg := zap.NewDevelopmentEncoderConfig()
+		fileCfg    := zap.NewProductionEncoderConfig()
+		consoleCfg.EncodeTime = zapcore.ISO8601TimeEncoder
+		fileCfg.EncodeTime   = zapcore.ISO8601TimeEncoder
+
+		consoleCore := zapcore.NewCore(
+			zapcore.NewConsoleEncoder(consoleCfg),
+			zapcore.AddSync(os.Stdout),
+			zapcore.DebugLevel,
+		)
+		fileCore := zapcore.NewCore(
+			zapcore.NewJSONEncoder(fileCfg),
+			zapcore.AddSync(logFile),
+			zapcore.InfoLevel,
+		)
+		log = zap.New(zapcore.NewTee(consoleCore, fileCore))
 	} else {
-		log, err = zap.NewDevelopment()
-	}
-	if err != nil {
-		panic(err)
+		// Fallback: console only
+		if os.Getenv("QUIPU_ENV") == "production" {
+			log, err = zap.NewProduction()
+		} else {
+			log, err = zap.NewDevelopment()
+		}
+		if err != nil { panic(err) }
 	}
 	defer log.Sync()
+	if logFile != nil { defer logFile.Close() }
 
 	log.Info("quipu signaling server", zap.String("version", Version))
 

@@ -1,6 +1,6 @@
-## [0.1.18] - 2026-04-11
+## [0.1.19] - 2026-04-11
 
-Screen share as floating overlay, chat always accessible, auto-open when peer starts sharing
+Server log file, fix screen share empty stream on renegotiation, improve share UX
 
 # Changelog
 

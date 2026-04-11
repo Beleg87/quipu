@@ -1469,18 +1469,18 @@ function trySFU(channel: string): Promise<boolean> {
 
     pc.ontrack = (ev) => {
       const track = ev.track;
+      // Use the provided stream, or wrap track in a new MediaStream (renegotiation case)
+      const stream = ev.streams[0] ?? new MediaStream([track]);
       if (track.kind === "audio") {
-        // Audio — attach to hidden audio element
         let container = document.getElementById("audio-container");
         if (!container) { container = document.createElement("div"); container.id = "audio-container"; document.body.appendChild(container); }
-        const sid = ev.streams[0]?.id || "sfu";
+        const sid = stream.id;
         let audio = document.getElementById(`audio-sfu-${sid}`) as HTMLAudioElement | null;
         if (!audio) { audio = document.createElement("audio"); audio.id = `audio-sfu-${sid}`; audio.autoplay = true; container.appendChild(audio); }
-        audio.srcObject = ev.streams[0];
+        audio.srcObject = stream;
       } else if (track.kind === "video") {
-        // Video — screen share track arriving from SFU
-        // The fp is encoded in the track label by the sender via sfu-screen-start
-        onSFUVideoTrack(ev.streams[0], track);
+        console.log("[SFU] video track received:", track.id, "stream:", stream.id);
+        onSFUVideoTrack(stream, track);
       }
     };
 
@@ -1679,6 +1679,7 @@ const pendingScreenMeta: Map<string, string> = new Map(); // fp → label
 
 // Called when we receive a video track from the SFU (someone else sharing)
 function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
+  console.log("[SFU] onSFUVideoTrack called, stream:", stream.id, "pending meta:", [...pendingScreenMeta.entries()]);
   // Try to match against any pending sfu-screen-start metadata by checking all pending fps
   // The track stream ID isn't tied to the fp, so we use arrival order as a heuristic
   // The sfu-screen-start broadcast updates the label once it arrives
