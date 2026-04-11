@@ -77,8 +77,20 @@ function getIceServers(): RTCIceServer[] {
 let localStream: MediaStream | null = null;
 let chatNextId = 1;
 
-// Separate set tracking fingerprints of peers in the current voice channel
+// Per-channel voice peer tracking — who is in which voice channel
+// Key: channel name, Value: set of fingerprints
+const channelPeers: Map<string, Set<string>> = new Map();
+
+// voicePeers = peers in MY currently active channel (convenience alias)
 const voicePeers: Set<string> = new Set();
+
+// Output device ID (for speaker selection)
+let outputDeviceId: string = "";
+
+// Speaking indicator: fp → boolean
+const speakingPeers: Map<string, boolean> = new Map();
+let speakingAnalyser: AnalyserNode | null = null;
+let speakingTimer: ReturnType<typeof setInterval> | null = null;
 
 // Per-peer volume (0–200, where 100 = normal)
 const peerVolumes: Map<string, number> = new Map();
@@ -160,6 +172,48 @@ function checkSilence() {
 function stopAfkDetection() {
   if (afkTimer) { clearTimeout(afkTimer); afkTimer = null; }
   afkAnalyser = null;
+}
+
+// ── Speaking indicator ───────────────────────────────────────────────────────
+
+function startSpeakingDetection() {
+  stopSpeakingDetection();
+  if (!localStream) return;
+  try {
+    const ctx  = new AudioContext();
+    const src  = ctx.createMediaStreamSource(localStream);
+    speakingAnalyser = ctx.createAnalyser();
+    speakingAnalyser.fftSize = 512;
+    speakingAnalyser.smoothingTimeConstant = 0.3;
+    src.connect(speakingAnalyser);
+    const data = new Uint8Array(speakingAnalyser.frequencyBinCount);
+    speakingTimer = setInterval(() => {
+      if (!speakingAnalyser) return;
+      speakingAnalyser.getByteFrequencyData(data);
+      const avg = data.reduce((a, b) => a + b, 0) / data.length;
+      const isSpeaking = avg > 8;
+      const wasSpeaking = speakingPeers.get(state.fingerprint);
+      if (isSpeaking !== wasSpeaking) {
+        speakingPeers.set(state.fingerprint, isSpeaking);
+        renderSidebarSpeaking();
+      }
+    }, 150);
+  } catch (e) { console.warn("Speaking detection init failed:", e); }
+}
+
+function stopSpeakingDetection() {
+  if (speakingTimer) { clearInterval(speakingTimer); speakingTimer = null; }
+  speakingAnalyser = null;
+  speakingPeers.clear();
+}
+
+// Update just the speaking dots without full sidebar re-render
+function renderSidebarSpeaking() {
+  const isSpeaking = speakingPeers.get(state.fingerprint);
+  const selfDot = document.querySelector(".voice-peer-item .dot.self-dot") as HTMLElement | null;
+  if (selfDot) {
+    selfDot.className = `dot ${isSpeaking ? "speaking" : "connected"} self-dot`;
+  }
 }
 
 // ── Role helpers ──────────────────────────────────────────────────────────────
@@ -403,9 +457,14 @@ function renderSidebar() {
       el.className = `ch-item ch-voice ${isActive ? "active" : ""}`;
       el.dataset.ch = ch;
       const isDefault = ["Main", "Gaming", "AFK"].includes(ch);
+      // Show who is in this channel (from channelPeers map)
+      const chPeers = channelPeers.get(ch) ?? new Set<string>();
+      const peerNames = [...chPeers].map(fp => displayName(fp)).join(", ");
+      const peerBadge = chPeers.size > 0 ? `<span class="ch-peer-count" title="${peerNames}">${chPeers.size}</span>` : "";
       el.innerHTML = `
         <span class="ch-icon">🔊</span>
         <span class="ch-name">${escapeHtml(ch)}</span>
+        ${peerBadge}
         ${isActive ? `<span class="ch-live">live</span>` : ""}
         ${isDefault || !canManage ? "" : `<button class="ch-del" data-ch="${ch}" data-type="voice">×</button>`}`;
       el.addEventListener("click", (e) => {
@@ -437,8 +496,9 @@ function renderSidebar() {
         // Show yourself first
         const selfEl = document.createElement("div");
         selfEl.className = "voice-peer-item";
+        const selfSpeaking = speakingPeers.get(state.fingerprint);
         selfEl.innerHTML = `
-          <span class="dot connected"></span>
+          <span class="dot ${selfSpeaking ? "speaking" : "connected"} self-dot"></span>
           <span class="voice-peer-name">${roleBadge(state.fingerprint)}${escapeHtml(state.myNickname || state.fingerprint.slice(0, 8))}</span>
           <span class="voice-peer-you">(you)</span>`;
         peersDiv.appendChild(selfEl);
@@ -467,13 +527,22 @@ function renderSidebar() {
           peersDiv.appendChild(pEl);
         });
         activeEl.after(peersDiv);
-        // Wire volume sliders
+        // Wire volume sliders — use "input" for live feedback but skip re-render
         peersDiv.querySelectorAll(".peer-volume").forEach(slider => {
-          slider.addEventListener("input", () => {
-            const fp  = (slider as HTMLElement).dataset.fp!;
-            const val = parseInt((slider as HTMLInputElement).value);
+          const s = slider as HTMLInputElement;
+          // Show live value without triggering full sidebar re-render
+          s.addEventListener("input", () => {
+            const val = parseInt(s.value);
+            s.setAttribute("title", `Volume: ${val}%`);
+            // Update visual label if present
+            const label = s.nextElementSibling as HTMLElement | null;
+            if (label?.classList.contains("vol-label")) label.textContent = `${val}%`;
+          });
+          // Apply volume only on release to avoid thrashing
+          s.addEventListener("change", () => {
+            const fp  = s.dataset.fp!;
+            const val = parseInt(s.value);
             setPeerVolume(fp, val);
-            slider.setAttribute("title", `Volume: ${val}%`);
           });
         });
       }
@@ -628,6 +697,50 @@ function scrollBottom() {
 
 // ── Settings view ─────────────────────────────────────────────────────────────
 
+async function populateAudioDevices() {
+  try {
+    // Request permission so labels are available
+    await navigator.mediaDevices.getUserMedia({ audio: true }).then(s => s.getTracks().forEach(t => t.stop())).catch(() => {});
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const micSel     = document.getElementById("mic-select")     as HTMLSelectElement | null;
+    const speakerSel = document.getElementById("speaker-select") as HTMLSelectElement | null;
+    const inputs  = devices.filter(d => d.kind === "audioinput");
+    const outputs = devices.filter(d => d.kind === "audiooutput");
+    if (micSel) {
+      micSel.innerHTML = `<option value="">Default</option>`;
+      inputs.forEach(d => {
+        const opt = document.createElement("option");
+        opt.value = d.deviceId;
+        opt.text  = d.label || `Microphone ${d.deviceId.slice(0, 8)}`;
+        micSel.appendChild(opt);
+      });
+    }
+    if (speakerSel) {
+      speakerSel.innerHTML = `<option value="">Default</option>`;
+      outputs.forEach(d => {
+        const opt = document.createElement("option");
+        opt.value = d.deviceId;
+        opt.text  = d.label || `Speaker ${d.deviceId.slice(0, 8)}`;
+        if (d.deviceId === outputDeviceId) opt.selected = true;
+        speakerSel.appendChild(opt);
+      });
+      speakerSel.addEventListener("change", () => {
+        outputDeviceId = speakerSel.value;
+        applyOutputDevice();
+      });
+    }
+  } catch (e) { console.warn("Device enumeration failed:", e); }
+}
+
+function applyOutputDevice() {
+  // Apply output device to all active audio elements
+  document.querySelectorAll("audio").forEach(audio => {
+    if (typeof (audio as any).setSinkId === "function" && outputDeviceId) {
+      (audio as any).setSinkId(outputDeviceId).catch(console.warn);
+    }
+  });
+}
+
 function showSettings() {
   const content = document.getElementById("main-content")!;
   content.innerHTML = `
@@ -663,6 +776,21 @@ function showSettings() {
       </section>
 
       <section class="settings-section">
+        <h2>Audio devices</h2>
+        <div class="field-group">
+          <label class="field"><span>Microphone (input)</span>
+            <select id="mic-select" class="cfg-select">
+              <option value="">Default</option>
+            </select>
+          </label>
+          <label class="field"><span>Speaker (output)</span>
+            <select id="speaker-select" class="cfg-select">
+              <option value="">Default</option>
+            </select>
+          </label>
+        </div>
+        <p class="settings-hint">Changes take effect on next voice join.</p>
+
         <h2>Connected peers</h2>
         <div id="peer-nickname-list"></div>
       </section>
@@ -1064,6 +1192,7 @@ function onRole(msg: any) {
   renderSidebar();
   renderPeerNicknameList();
   renderBanList();
+  populateAudioDevices();
 }
 
 function onCommand(msg: any) {
@@ -1114,6 +1243,7 @@ function onPeerJoined(fp: string) {
   if (!state.peers.has(fp)) state.peers.set(fp, { fp, pc: null as any, muted: false });
   if (state.activeVoice) voicePeers.add(fp);
   renderSidebar();
+  broadcastNickname(); // make sure new peer gets our nickname
   const st = document.getElementById("text-status");
   if (st) st.textContent = `${state.peers.size} peer(s) connected`;
   if (state.connected && state.myNickname) broadcastNickname();
@@ -1132,6 +1262,30 @@ function onPeerLeft(fp: string) {
 }
 
 function onChatMessage(msg: any) {
+  // Voice join broadcast — track which channel a peer is in
+  if (msg.payload?.text?.startsWith("__voice-join:")) {
+    const ch = msg.payload.text.replace("__voice-join:", "");
+    // Remove from all channels first (they can only be in one)
+    channelPeers.forEach(set => set.delete(msg.from));
+    if (!channelPeers.has(ch)) channelPeers.set(ch, new Set());
+    channelPeers.get(ch)!.add(msg.from);
+    renderSidebar();
+    return;
+  }
+  // Voice leave broadcast — remove peer from voice without them disconnecting from signaling
+  if (msg.payload?.text?.startsWith("__voice-leave:")) {
+    const ch = msg.payload.text.replace("__voice-leave:", "");
+    voicePeers.delete(msg.from);
+    const cpSet = channelPeers.get(ch);
+    if (cpSet) cpSet.delete(msg.from);
+    // Close their P2P connection if in P2P mode
+    const peer = state.peers.get(msg.from);
+    if (peer?.pc) { peer.pc.close(); state.peers.set(msg.from, { ...peer, pc: null as any }); }
+    // Remove their audio element
+    document.getElementById(`audio-${msg.from}`)?.remove();
+    renderSidebar();
+    return;
+  }
   const rawText = msg.payload?.text ?? "";
   if (!rawText) return;
   if (rawText.startsWith("__nick:")) {
@@ -1179,18 +1333,26 @@ async function toggleVoiceChannel(ch: string) {
   if (state.activeVoice === ch) { leaveVoice(); return; }
   if (state.activeVoice) leaveVoice();
 
-  const sel = document.getElementById("mic-select") as HTMLSelectElement | null;
+  const micSel = document.getElementById("mic-select") as HTMLSelectElement | null;
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({
-      audio: (sel?.value) ? { deviceId: { exact: sel.value } } : true,
-      video: false,
-    });
+    const audioConstraints: MediaTrackConstraints = {
+      // Browser-native noise suppression — free, zero CPU cost
+      noiseSuppression:   true,
+      echoCancellation:   true,
+      autoGainControl:    true,
+    };
+    if (micSel?.value) audioConstraints.deviceId = { exact: micSel.value };
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
   } catch (e) { alert(`Microphone access denied: ${e}`); return; }
 
   state.activeVoice = ch;
   voicePeers.clear();
   state.peers.forEach((_, fp) => voicePeers.add(fp));
+  // Track ourselves in this channel
+  if (!channelPeers.has(ch)) channelPeers.set(ch, new Set());
+  channelPeers.get(ch)!.add(state.fingerprint);
   startAfkDetection();
+  startSpeakingDetection();
 
   const voiceStatus = document.getElementById("voice-status")!;
   const voiceLabel  = document.getElementById("voice-status-label")!;
@@ -1316,6 +1478,20 @@ function leaveVoice() {
   state.activeVoice = null;
   voicePeers.clear();
   stopAfkDetection();
+  stopSpeakingDetection();
+  // Remove ourselves from channel tracking
+  if (ch) {
+    const cpSet = channelPeers.get(ch);
+    if (cpSet) cpSet.delete(state.fingerprint);
+  }
+  // Notify others we left voice
+  if (ch && state.connected) {
+    invoke("send_chat", {
+      text: `__voice-leave:${ch}`,
+      fingerprint: state.fingerprint,
+      room: "quipu-main",
+    }).catch(() => {});
+  }
   localStream?.getTracks().forEach(t => t.stop());
   localStream = null;
   if (sfuPc) {
@@ -1389,6 +1565,9 @@ async function onRtcOffer(msg: any) {
     if (!audio) { audio = document.createElement("audio"); audio.id = `audio-${msg.from}`; audio.autoplay = true; container.appendChild(audio); }
     audio.srcObject = ev.streams[0];
     setPeerVolume(msg.from, getPeerVolume(msg.from));
+    if (outputDeviceId && typeof (audio as any).setSinkId === "function") {
+      (audio as any).setSinkId(outputDeviceId).catch(console.warn);
+    }
   };
   pc.onicecandidate = (ev) => {
     if (!ev.candidate) return;

@@ -330,3 +330,31 @@ input  { font: inherit; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .mod-unban { font-size: 0.75rem; padding: 0.25rem 0.5rem; flex-shrink: 0; }
+
+/* ── Speaking indicator ── */
+.dot.speaking {
+  background: #4caf50;
+  box-shadow: 0 0 6px #4caf50;
+  animation: pulse-speak 0.6s ease-in-out infinite alternate;
+}
+@keyframes pulse-speak {
+  from { box-shadow: 0 0 3px #4caf50; }
+  to   { box-shadow: 0 0 10px #4caf50; transform: scale(1.15); }
+}
+
+/* ── Channel peer count badge ── */
+.ch-peer-count {
+  font-size: 0.68rem; color: var(--accent-hi);
+  background: var(--accent-dim); border-radius: 8px;
+  padding: 0 5px; margin-left: auto; flex-shrink: 0;
+  cursor: default;
+}
+
+/* ── Audio device selects ── */
+.cfg-select {
+  flex: 1; background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text);
+  padding: 0.35rem 0.5rem; font-size: 0.82rem; font-family: inherit;
+}
+.cfg-select:focus { outline: none; border-color: var(--accent-hi); }
+.field-group { display: flex; flex-direction: column; gap: 0.5rem; }

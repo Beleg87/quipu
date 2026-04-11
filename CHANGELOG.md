@@ -1,6 +1,6 @@
-## [0.1.9] - 2026-04-11
+## [0.1.10] - 2026-04-11
 
-Pion SFU, self-updating binary, crash restart
+Fix SFU join race condition, P2P voice cleanup, speaking indicator, audio device selection, noise suppression, channel peer visibility, volume slider fix
 
 # Changelog
 
