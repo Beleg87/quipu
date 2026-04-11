@@ -510,11 +510,11 @@ input  { font: inherit; }
 /* ── Screen share drawer ── */
 .screen-drawer {
   position: fixed;
-  top: 0; right: 0; bottom: 0;
+  top: 32px; right: 0; bottom: 0;
   width: 400px;
   display: flex; flex-direction: row;
   z-index: 400;
-  /* pointer-events: all — drawer blocks clicks intentionally */
+  pointer-events: all;
 }
 .screen-drawer.focused-mode { width: 600px; }
 

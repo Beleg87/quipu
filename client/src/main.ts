@@ -96,6 +96,10 @@ let speakingTimer: ReturnType<typeof setInterval> | null = null;
 const peerVolumes: Map<string, number> = new Map();
 // fp → audio element (covers both SFU and P2P modes)
 const peerAudioEls: Map<string, HTMLAudioElement> = new Map();
+// Queue of fps that recently sent __voice-join (for audio element association)
+const pendingAudioFps: string[] = [];
+// Pending screen-start metadata (broadcast may arrive before or after track)
+const pendingScreenMeta: Map<string, string> = new Map(); // fp → label
 
 function getPeerVolume(fp: string): number {
   return peerVolumes.get(fp) ?? 100;
@@ -296,6 +300,37 @@ function stopSpeakingDetection() {
   speakingPeers.clear();
 }
 
+// Monitor a remote peer's audio element for speaking activity
+const peerSpeakingTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
+
+function monitorPeerAudio(fp: string, audio: HTMLAudioElement) {
+  // Clean up any existing monitor for this peer
+  const existing = peerSpeakingTimers.get(fp);
+  if (existing) clearInterval(existing);
+  try {
+    const ctx  = new AudioContext();
+    const src  = ctx.createMediaElementSource(audio);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.3;
+    src.connect(analyser);
+    src.connect(ctx.destination); // must reconnect to output after createMediaElementSource
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const timer = setInterval(() => {
+      analyser.getByteFrequencyData(data);
+      const avg = data.reduce((a, b) => a + b, 0) / data.length;
+      const speaking = avg > 8;
+      if (speakingPeers.get(fp) !== speaking) {
+        speakingPeers.set(fp, speaking);
+        // Update just this peer's dot
+        const dot = document.querySelector(`.voice-peer-item[data-fp="${fp}"] .dot`) as HTMLElement | null;
+        if (dot) dot.className = `dot ${speaking ? "speaking" : "connected"}`;
+      }
+    }, 150);
+    peerSpeakingTimers.set(fp, timer);
+  } catch (e) { console.warn("Peer audio monitor failed:", e); }
+}
+
 // Update just the speaking dots without full sidebar re-render
 function renderSidebarSpeaking() {
   const isSpeaking = speakingPeers.get(state.fingerprint);
@@ -386,7 +421,26 @@ function saveMsg(ch: string, msg: StoredMessage) {
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
+function cleanLocalStorageInternals() {
+  // Remove any internally-stored __voice-join/__voice-leave messages
+  // that were cached before server-side filtering was added
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith("quipu_msgs_")) continue;
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const msgs = JSON.parse(raw) as any[];
+      const cleaned = msgs.filter(m => !isInternalMessage(m.text ?? ""));
+      if (cleaned.length !== msgs.length) {
+        localStorage.setItem(key, JSON.stringify(cleaned));
+      }
+    }
+  } catch {}
+}
+
 async function init() {
+  cleanLocalStorageInternals();
   const version = await invoke<string>("get_version");
   const app = document.getElementById("app")!;
   app.innerHTML = buildShell(version);
@@ -604,6 +658,7 @@ function renderSidebar() {
           const vol = getPeerVolume(fp);
           const pEl = document.createElement("div");
           pEl.className = "voice-peer-item";
+          pEl.dataset.fp = fp; // needed for speaking indicator targeting
           // Draggable for admin/mod to move peers between channels
           const draggable = isPrivileged() ? `draggable="true" data-fp="${fp}"` : "";
           pEl.innerHTML = `
@@ -1593,6 +1648,7 @@ function trySFU(channel: string): Promise<boolean> {
         if (pendingFp) {
           peerAudioEls.set(pendingFp, audio);
           audio.volume = Math.min(getPeerVolume(pendingFp) / 100, 1.0);
+          monitorPeerAudio(pendingFp, audio);
         }
       } else if (track.kind === "video") {
         console.log("[SFU] video track received:", track.id, "stream:", stream.id);
@@ -1790,10 +1846,6 @@ function updateShareButton(sharing: boolean) {
   btn.title = sharing ? "Stop sharing" : "Share screen";
 }
 
-// Pending screen-start metadata (broadcast may arrive before or after track)
-const pendingScreenMeta: Map<string, string> = new Map(); // fp → label
-// Queue of fps that recently joined voice (for audio element association)
-const pendingAudioFps: string[] = [];
 
 // Called when we receive a video track from the SFU (someone else sharing)
 function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {

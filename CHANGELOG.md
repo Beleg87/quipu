@@ -1,6 +1,6 @@
-## [0.1.26] - 2026-04-12
+## [0.1.27] - 2026-04-12
 
-Fix Simulcast error, screen share on channel switch, sounds, volume in SFU, peer count
+Fix volume, speaking indicators for all peers, drawer position, clear old internal chat messages on startup
 
 # Changelog
 
