@@ -395,6 +395,42 @@ input  { font: inherit; }
   display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem;
 }
 
+/* ── Screen share button in voice bar ── */
+.btn-share {
+  background: none; border: none; color: var(--muted);
+  font-size: 1rem; cursor: pointer; padding: 0 0.25rem;
+  line-height: 1; transition: color 0.15s;
+}
+.btn-share:hover { color: var(--text); }
+.btn-share.sharing { color: #4caf50; animation: pulse-speak 1s ease-in-out infinite alternate; }
+
+/* ── Quality picker modal ── */
+.share-picker-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+  display: flex; align-items: center; justify-content: center; z-index: 1000;
+}
+.share-picker-box {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 1.75rem 2rem;
+  width: 380px; max-width: 95vw;
+}
+.share-picker-box h2 { font-size: 1rem; margin-bottom: 0.4rem; }
+.quality-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 0.4rem; margin: 1rem 0;
+}
+.quality-btn {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--muted);
+  font-size: 0.78rem; padding: 0.45rem 0.3rem;
+  cursor: pointer; transition: all 0.15s; font-family: inherit;
+}
+.quality-btn:hover { border-color: var(--accent-hi); color: var(--text); }
+.quality-btn.selected { border-color: var(--accent-hi); background: var(--accent-dim); color: var(--text); }
+.share-picker-actions {
+  display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem;
+}
+
 /* ── Screen grid ── */
 .screen-grid {
   display: flex; flex-direction: column;
@@ -468,3 +504,76 @@ input  { font: inherit; }
   cursor: pointer; font-family: inherit; flex-shrink: 0;
 }
 .screen-bar-btn:hover { opacity: 0.85; }
+
+/* ── Screen share overlay ── */
+.screen-overlay {
+  position: fixed;
+  /* Default: bottom-right corner, non-intrusive */
+  bottom: 60px; right: 16px;
+  width: 480px; height: 320px;
+  background: #0d0d0d;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex; flex-direction: column;
+  z-index: 500;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  resize: both; overflow: hidden;
+  min-width: 320px; min-height: 200px;
+}
+.screen-overlay.focused-mode {
+  /* Expand to near-fullscreen when focused */
+  top: 40px; left: 50%; right: 16px;
+  bottom: 60px; width: auto; height: auto;
+}
+.screen-overlay-header {
+  display: flex; align-items: center;
+  padding: 0.3rem 0.6rem;
+  background: rgba(0,0,0,0.8);
+  border-bottom: 1px solid var(--border);
+  cursor: move; flex-shrink: 0;
+  user-select: none;
+}
+.screen-overlay-title { flex: 1; font-size: 0.75rem; color: var(--muted); }
+.screen-overlay-close {
+  background: none; border: none; color: var(--muted);
+  cursor: pointer; font-size: 0.9rem; padding: 0 0.25rem;
+  line-height: 1;
+}
+.screen-overlay-close:hover { color: var(--text); }
+
+.screen-grid-inner {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 2px; padding: 2px;
+  flex: 1; overflow: hidden;
+}
+.screen-overlay.focused-mode .screen-grid-inner { display: flex; }
+.screen-overlay.focused-mode .screen-tile.hidden { display: none; }
+.screen-overlay.focused-mode .screen-tile.focused { flex: 1; }
+
+.screen-tile {
+  position: relative; background: #111;
+  overflow: hidden; display: flex; flex-direction: column;
+  min-height: 0;
+}
+.screen-tile-header {
+  display: flex; align-items: center; gap: 0.3rem;
+  padding: 0.2rem 0.4rem;
+  background: rgba(0,0,0,0.7);
+  position: absolute; top: 0; left: 0; right: 0;
+  z-index: 2; opacity: 0; transition: opacity 0.15s;
+}
+.screen-tile:hover .screen-tile-header { opacity: 1; }
+.screen-tile-label { flex: 1; color: #eee; font-size: 0.7rem; }
+.focus-btn, .stop-share-btn {
+  background: rgba(255,255,255,0.15); border: none;
+  color: #eee; font-size: 0.68rem; padding: 0.1rem 0.3rem;
+  border-radius: 3px; cursor: pointer; font-family: inherit;
+}
+.focus-btn:hover { background: rgba(255,255,255,0.3); }
+.stop-share-btn { background: rgba(220,50,50,0.7); }
+.stop-share-btn:hover { background: rgba(220,50,50,0.9); }
+.screen-video {
+  width: 100%; height: 100%; object-fit: contain;
+  flex: 1; display: block; background: #000;
+}

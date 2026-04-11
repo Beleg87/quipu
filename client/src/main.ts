@@ -614,7 +614,6 @@ function addVoiceChannel() {
 // ── Text view ─────────────────────────────────────────────────────────────────
 
 function showText(ch: string, force = false) {
-  if (!force && activeScreens.size > 0) return;
   state.activeText = ch;
   // Clear unread badge
   const badge = document.getElementById(`unread-${ch}`);
@@ -1694,7 +1693,7 @@ function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
   if (matched) pendingScreenMeta.delete(matched);
 
   activeScreens.set(key, { stream, label });
-  renderScreenGrid();
+  renderScreenGrid(); // opens/updates the overlay automatically
 
   track.addEventListener("ended", () => {
     // Delete by stream key or fp key (whichever is current)
@@ -1709,23 +1708,22 @@ function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
 function onRemoteScreenStart(msg: any) {
   const fp    = msg.from ?? msg.payload?.from;
   const label = msg.payload?.label ?? displayName(fp);
-  // Find existing temp entry (by stream: prefix) and re-key it to the real fp
   const streamKey = [...activeScreens.keys()].find(k => k.startsWith("__stream:"));
   if (streamKey) {
     const val = activeScreens.get(streamKey)!;
     activeScreens.delete(streamKey);
     activeScreens.set(fp, { ...val, label });
-    renderScreenGrid();
-    // Re-attach stream to the new video element (renderScreenGrid creates a new DOM element)
+    renderScreenGrid(); // re-render overlay with correct label
+    // Re-attach stream after DOM is rebuilt
     requestAnimationFrame(() => {
       const vid = document.getElementById(`vid-${fp}`) as HTMLVideoElement | null;
       if (vid && vid.srcObject !== val.stream) vid.srcObject = val.stream;
     });
   } else {
-    // Broadcast arrived before track — store metadata for when onSFUVideoTrack fires
     pendingScreenMeta.set(fp, label);
-    renderScreenGrid(); // show placeholder if needed
+    // Show notification in sidebar — overlay will open when track arrives
   }
+  renderSidebar(); // update sidebar bar immediately
 }
 
 function onRemoteScreenStop(msg: any) {
@@ -1740,28 +1738,30 @@ function onRemoteScreenStop(msg: any) {
 // ── Screen grid renderer ──────────────────────────────────────────────────────
 
 function renderScreenGrid() {
-  const main = document.getElementById("main-content");
-  if (!main) return;
+  // Remove any existing overlay
+  document.getElementById("screen-overlay")?.remove();
+  renderSidebar(); // update the sidebar bar
 
-  if (activeScreens.size === 0) {
-    if (state.activeText) showText(state.activeText, true);
-    renderSidebar(); // update screen bar
-    return;
-  }
-  renderSidebar(); // update screen bar with current sharers
+  if (activeScreens.size === 0) return;
 
-  // Build screen grid HTML
   const focused = focusedScreen && activeScreens.has(focusedScreen) ? focusedScreen : null;
 
-  main.innerHTML = `
-    <div class="screen-grid ${focused ? "focused-mode" : "grid-mode"}" id="screen-grid">
+  const overlay = document.createElement("div");
+  overlay.id = "screen-overlay";
+  overlay.className = `screen-overlay ${focused ? "focused-mode" : "grid-mode"}`;
+  overlay.innerHTML = `
+    <div class="screen-overlay-header">
+      <span class="screen-overlay-title">🖥 Screen shares</span>
+      <button class="screen-overlay-close" id="screen-overlay-close" title="Close (still sharing)">✕</button>
+    </div>
+    <div class="screen-grid-inner">
       ${[...activeScreens.entries()].map(([fp, { label }]) => `
         <div class="screen-tile ${focused === fp ? "focused" : focused ? "hidden" : ""}"
              data-fp="${fp}" id="tile-${fp}">
           <div class="screen-tile-header">
             <span class="screen-tile-label">${escapeHtml(label)}</span>
             ${fp === state.fingerprint ? `<button class="stop-share-btn" title="Stop sharing">■ Stop</button>` : ""}
-            <button class="focus-btn" title="${focused === fp ? "Back to grid" : "Focus"}">
+            <button class="focus-btn" title="${focused === fp ? "Back to grid" : "Fullscreen"}">
               ${focused === fp ? "⊟" : "⊞"}
             </button>
           </div>
@@ -1770,14 +1770,39 @@ function renderScreenGrid() {
       `).join("")}
     </div>`;
 
+  document.body.appendChild(overlay);
+
   // Attach streams to video elements
   activeScreens.forEach(({ stream }, fp) => {
     const vid = document.getElementById(`vid-${fp}`) as HTMLVideoElement | null;
-    if (vid) vid.srcObject = stream;
+    if (vid && vid.srcObject !== stream) vid.srcObject = stream;
   });
 
-  // Wire focus buttons
-  main.querySelectorAll(".focus-btn").forEach(btn => {
+  // Close overlay (stops viewing but doesn't stop sharing)
+  document.getElementById("screen-overlay-close")?.addEventListener("click", () => {
+    overlay.remove();
+  });
+
+  // Draggable overlay
+  const header = overlay.querySelector(".screen-overlay-header") as HTMLElement | null;
+  if (header) {
+    let dragging = false, ox = 0, oy = 0;
+    header.addEventListener("mousedown", (e) => {
+      dragging = true;
+      ox = e.clientX - overlay.offsetLeft;
+      oy = e.clientY - overlay.offsetTop;
+      overlay.style.right = "auto"; overlay.style.bottom = "auto";
+    });
+    document.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      overlay.style.left = `${e.clientX - ox}px`;
+      overlay.style.top  = `${e.clientY - oy}px`;
+    });
+    document.addEventListener("mouseup", () => { dragging = false; });
+  }
+
+  // Focus buttons
+  overlay.querySelectorAll(".focus-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       const fp = (btn.closest(".screen-tile") as HTMLElement)?.dataset.fp!;
       focusedScreen = focusedScreen === fp ? null : fp;
@@ -1785,13 +1810,13 @@ function renderScreenGrid() {
     });
   });
 
-  // Wire stop button
-  main.querySelectorAll(".stop-share-btn").forEach(btn => {
+  // Stop share button
+  overlay.querySelectorAll(".stop-share-btn").forEach(btn => {
     btn.addEventListener("click", () => stopScreenShare());
   });
 
-  // Click tile body to focus/unfocus
-  main.querySelectorAll(".screen-tile").forEach(tile => {
+  // Double-click tile to focus
+  overlay.querySelectorAll(".screen-tile").forEach(tile => {
     tile.addEventListener("dblclick", () => {
       const fp = (tile as HTMLElement).dataset.fp!;
       focusedScreen = focusedScreen === fp ? null : fp;
@@ -1801,9 +1826,9 @@ function renderScreenGrid() {
 
   // Escape to unfocus
   const escHandler = (e: KeyboardEvent) => {
-    if (e.key === "Escape" && focusedScreen) {
-      focusedScreen = null;
-      renderScreenGrid();
+    if (e.key === "Escape") {
+      if (focusedScreen) { focusedScreen = null; renderScreenGrid(); }
+      else overlay.remove();
     }
   };
   document.removeEventListener("keydown", escHandler);
