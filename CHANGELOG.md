@@ -1,6 +1,6 @@
-## [0.1.23] - 2026-04-11
+## [0.1.24] - 2026-04-11
 
-Screen drawer collapsible tab, fix peer lingering on disconnect, smarter video track detection
+Screen drawer always visible as tab when in voice, opens on demand
 
 # Changelog
 

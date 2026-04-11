@@ -1458,6 +1458,7 @@ async function toggleVoiceChannel(ch: string) {
     voiceLabel.textContent = `\uD83D\uDD0A ${ch} \u00B7 SFU`;
     broadcastNickname();
     renderSidebar();
+    renderScreenGrid(); // show the drawer tab
     return;
   }
 
@@ -1792,17 +1793,58 @@ function renderScreenGrid() {
   updateScreenBar();
   const existing = document.getElementById("screen-drawer");
 
-  // If no active screens, remove drawer and return
-  if (activeScreens.size === 0) {
+  // Always show the drawer tab when in voice (SFU) — even when no one is sharing
+  // This lets viewers open it without needing to share themselves
+  const showDrawer = state.activeVoice && voiceMode === "sfu";
+
+  if (!showDrawer) {
     existing?.remove();
     screenDrawerOpen = false;
     return;
   }
 
-  // If drawer was manually closed by user, don't auto-reopen
-  // UNLESS this is a new share (screenDrawerOpen was set true by openScreenDrawer)
-  if (!screenDrawerOpen && existing) return; // drawer open, just update it
-  if (!screenDrawerOpen && !existing) return; // drawer closed, don't open
+  // If no content and drawer is closed, just render the collapsed tab
+  if (activeScreens.size === 0 && !screenDrawerOpen) {
+    // Render tab-only drawer (collapsed, no panel)
+    const drawer = existing ?? document.createElement("div");
+    drawer.id = "screen-drawer";
+    drawer.className = "screen-drawer collapsed";
+    drawer.innerHTML = `
+      <button class="screen-drawer-tab" id="screen-drawer-tab" title="Screen shares">
+        🖥 ${activeScreens.size}
+      </button>
+      <div class="screen-drawer-panel" style="display:none"></div>`;
+    if (!existing) document.body.appendChild(drawer);
+    document.getElementById("screen-drawer-tab")?.addEventListener("click", () => {
+      if (activeScreens.size > 0) { screenDrawerOpen = true; renderScreenGrid(); }
+      // If no one sharing, clicking tab does nothing useful yet
+    });
+    return;
+  }
+
+  // If drawer was manually closed and no new share, keep it closed (tab only)
+  if (!screenDrawerOpen && existing && activeScreens.size > 0) {
+    // Update the tab count but keep panel closed
+    const tab = existing.querySelector(".screen-drawer-tab");
+    if (tab) tab.textContent = `🖥 ${activeScreens.size}`;
+    return;
+  }
+  if (!screenDrawerOpen && !existing) {
+    // Render collapsed tab only
+    const drawer = document.createElement("div");
+    drawer.id = "screen-drawer";
+    drawer.className = "screen-drawer collapsed";
+    drawer.innerHTML = `
+      <button class="screen-drawer-tab" id="screen-drawer-tab" title="Screen shares (${activeScreens.size})">
+        🖥 ${activeScreens.size}
+      </button>
+      <div class="screen-drawer-panel" style="display:none"></div>`;
+    document.body.appendChild(drawer);
+    document.getElementById("screen-drawer-tab")?.addEventListener("click", () => {
+      if (activeScreens.size > 0) { screenDrawerOpen = true; renderScreenGrid(); }
+    });
+    return;
+  }
 
   const focused = focusedScreen && activeScreens.has(focusedScreen) ? focusedScreen : null;
 
@@ -1920,6 +1962,9 @@ function leaveVoice() {
   const ch = state.activeVoice;
   state.activeVoice = null;
   voicePeers.clear();
+  // Remove screen drawer — no longer in voice
+  document.getElementById("screen-drawer")?.remove();
+  screenDrawerOpen = false;
   stopAfkDetection();
   stopSpeakingDetection();
   // Remove ourselves from channel tracking
