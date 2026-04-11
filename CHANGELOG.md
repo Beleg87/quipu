@@ -1,6 +1,6 @@
-## [0.1.21] - 2026-04-11
+## [0.1.22] - 2026-04-11
 
-Fix screen overlay always showing, sidebar bar only when sharing, detect missed video tracks after renegotiation
+Screen share drawer: right panel, never auto-shows, opens only when sharing starts
 
 # Changelog
 

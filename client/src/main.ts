@@ -1646,7 +1646,7 @@ async function startScreenShare(presetIdx: number) {
     stream: screenStream,
     label:  state.myNickname || state.fingerprint.slice(0, 8),
   });
-  renderScreenGrid();
+  openScreenDrawer(); // explicitly open for sharer
   updateShareButton(true);
 
   // Broadcast via signaling hub so ALL peers in the room get notified (not just SFU peers)
@@ -1707,7 +1707,7 @@ function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
     }
   }
   activeScreens.set(finalKey, { stream, label });
-  renderScreenGrid();
+  openScreenDrawer(); // auto-open for viewers when someone starts sharing
   track.addEventListener("ended", () => {
     for (const [k, v] of activeScreens) {
       if (v.stream === stream) { activeScreens.delete(k); if (focusedScreen === k) focusedScreen = null; break; }
@@ -1726,7 +1726,7 @@ function onRemoteScreenStart(msg: any) {
     const val = activeScreens.get(streamKey)!;
     activeScreens.delete(streamKey);
     activeScreens.set(fp, { ...val, label });
-    renderScreenGrid();
+    openScreenDrawer();
     requestAnimationFrame(() => {
       const vid = document.getElementById(`vid-${fp}`) as HTMLVideoElement | null;
       if (vid && vid.srcObject !== val.stream) vid.srcObject = val.stream;
@@ -1735,7 +1735,7 @@ function onRemoteScreenStart(msg: any) {
     // Already keyed (track arrived first with correct fp) — just update label
     const val = activeScreens.get(fp)!;
     activeScreens.set(fp, { ...val, label });
-    renderScreenGrid();
+    renderScreenGrid(); // update drawer in-place (already open)
   } else {
     // Track hasn't arrived yet — store metadata
     pendingScreenMeta.set(fp, label);
@@ -1776,22 +1776,39 @@ function updateScreenBar() {
   });
 }
 
-function renderScreenGrid() {
-  // Remove any existing overlay
-  document.getElementById("screen-overlay")?.remove();
-  updateScreenBar(); // update sidebar bar WITHOUT calling renderSidebar
+// Track whether the drawer is open (user explicitly closed it = stays closed until new share)
+let screenDrawerOpen = false;
 
-  if (activeScreens.size === 0) return;
+function openScreenDrawer() {
+  screenDrawerOpen = true;
+  renderScreenGrid();
+}
+
+function renderScreenGrid() {
+  updateScreenBar();
+  const existing = document.getElementById("screen-drawer");
+
+  // If no active screens, remove drawer and return
+  if (activeScreens.size === 0) {
+    existing?.remove();
+    screenDrawerOpen = false;
+    return;
+  }
+
+  // If drawer was manually closed by user, don't auto-reopen
+  // UNLESS this is a new share (screenDrawerOpen was set true by openScreenDrawer)
+  if (!screenDrawerOpen && existing) return; // drawer open, just update it
+  if (!screenDrawerOpen && !existing) return; // drawer closed, don't open
 
   const focused = focusedScreen && activeScreens.has(focusedScreen) ? focusedScreen : null;
 
-  const overlay = document.createElement("div");
-  overlay.id = "screen-overlay";
-  overlay.className = `screen-overlay ${focused ? "focused-mode" : "grid-mode"}`;
-  overlay.innerHTML = `
-    <div class="screen-overlay-header">
-      <span class="screen-overlay-title">🖥 Screen shares</span>
-      <button class="screen-overlay-close" id="screen-overlay-close" title="Close (still sharing)">✕</button>
+  const drawer = existing ?? document.createElement("div");
+  drawer.id = "screen-drawer";
+  drawer.className = `screen-drawer ${focused ? "focused-mode" : ""}`;
+  drawer.innerHTML = `
+    <div class="screen-drawer-header">
+      <span class="screen-drawer-title">🖥 Screen shares (${activeScreens.size})</span>
+      <button class="screen-drawer-close" id="screen-drawer-close" title="Hide panel">✕</button>
     </div>
     <div class="screen-grid-inner">
       ${[...activeScreens.entries()].map(([fp, { label }]) => `
@@ -1800,7 +1817,7 @@ function renderScreenGrid() {
           <div class="screen-tile-header">
             <span class="screen-tile-label">${escapeHtml(label)}</span>
             ${fp === state.fingerprint ? `<button class="stop-share-btn" title="Stop sharing">■ Stop</button>` : ""}
-            <button class="focus-btn" title="${focused === fp ? "Back to grid" : "Fullscreen"}">
+            <button class="focus-btn" title="${focused === fp ? "Back to grid" : "Expand"}">
               ${focused === fp ? "⊟" : "⊞"}
             </button>
           </div>
@@ -1809,39 +1826,22 @@ function renderScreenGrid() {
       `).join("")}
     </div>`;
 
-  document.body.appendChild(overlay);
+  if (!existing) document.body.appendChild(drawer);
 
-  // Attach streams to video elements
+  // Attach streams
   activeScreens.forEach(({ stream }, fp) => {
     const vid = document.getElementById(`vid-${fp}`) as HTMLVideoElement | null;
     if (vid && vid.srcObject !== stream) vid.srcObject = stream;
   });
 
-  // Close overlay (stops viewing but doesn't stop sharing)
-  document.getElementById("screen-overlay-close")?.addEventListener("click", () => {
-    overlay.remove();
+  // Close = hide drawer, mark closed so it doesn't reopen automatically
+  document.getElementById("screen-drawer-close")?.addEventListener("click", () => {
+    drawer.remove();
+    screenDrawerOpen = false;
   });
 
-  // Draggable overlay
-  const header = overlay.querySelector(".screen-overlay-header") as HTMLElement | null;
-  if (header) {
-    let dragging = false, ox = 0, oy = 0;
-    header.addEventListener("mousedown", (e) => {
-      dragging = true;
-      ox = e.clientX - overlay.offsetLeft;
-      oy = e.clientY - overlay.offsetTop;
-      overlay.style.right = "auto"; overlay.style.bottom = "auto";
-    });
-    document.addEventListener("mousemove", (e) => {
-      if (!dragging) return;
-      overlay.style.left = `${e.clientX - ox}px`;
-      overlay.style.top  = `${e.clientY - oy}px`;
-    });
-    document.addEventListener("mouseup", () => { dragging = false; });
-  }
-
-  // Focus buttons
-  overlay.querySelectorAll(".focus-btn").forEach(btn => {
+  // Focus/expand buttons
+  drawer.querySelectorAll(".focus-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       const fp = (btn.closest(".screen-tile") as HTMLElement)?.dataset.fp!;
       focusedScreen = focusedScreen === fp ? null : fp;
@@ -1849,13 +1849,13 @@ function renderScreenGrid() {
     });
   });
 
-  // Stop share button
-  overlay.querySelectorAll(".stop-share-btn").forEach(btn => {
+  // Stop share
+  drawer.querySelectorAll(".stop-share-btn").forEach(btn => {
     btn.addEventListener("click", () => stopScreenShare());
   });
 
-  // Double-click tile to focus
-  overlay.querySelectorAll(".screen-tile").forEach(tile => {
+  // Double-click to expand
+  drawer.querySelectorAll(".screen-tile").forEach(tile => {
     tile.addEventListener("dblclick", () => {
       const fp = (tile as HTMLElement).dataset.fp!;
       focusedScreen = focusedScreen === fp ? null : fp;
@@ -1863,30 +1863,29 @@ function renderScreenGrid() {
     });
   });
 
-  // Escape to unfocus
+  // Escape to un-focus
   const escHandler = (e: KeyboardEvent) => {
-    if (e.key === "Escape") {
-      if (focusedScreen) { focusedScreen = null; renderScreenGrid(); }
-      else overlay.remove();
-    }
+    if (e.key === "Escape" && focusedScreen) { focusedScreen = null; renderScreenGrid(); }
   };
   document.removeEventListener("keydown", escHandler);
   document.addEventListener("keydown", escHandler);
 }
 
 // After renegotiation, scan receivers for video tracks not yet in activeScreens
+// Only processes tracks that are unmuted (have real content from a sender)
 function checkForNewVideoTracks() {
   if (!sfuPc) return;
   for (const recv of sfuPc.getReceivers()) {
     const track = recv.track;
     if (!track || track.kind !== "video" || track.readyState !== "live") continue;
-    // Check if this track is already in activeScreens
+    // Skip muted tracks — these are placeholder transceivers with no real content
+    if (track.muted) continue;
     let found = false;
     activeScreens.forEach(({ stream }) => {
       if (stream.getVideoTracks().some(t => t.id === track.id)) found = true;
     });
     if (!found) {
-      console.log("[SFU] found unregistered video track via receiver scan:", track.id);
+      console.log("[SFU] found unregistered video track:", track.id, "muted:", track.muted);
       const stream = new MediaStream([track]);
       onSFUVideoTrack(stream, track);
     }
