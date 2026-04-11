@@ -1,6 +1,6 @@
-## [0.1.20] - 2026-04-11
+## [0.1.21] - 2026-04-11
 
-Fix screen share video track delivery, auto-connect URL loading, SFU video transceiver pre-allocation
+Fix screen overlay always showing, sidebar bar only when sharing, detect missed video tracks after renegotiation
 
 # Changelog
 

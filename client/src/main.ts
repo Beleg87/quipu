@@ -557,6 +557,9 @@ function renderSidebar() {
     }
   }
   // Wire delete buttons
+  // Screen share bar — shows above voice channels when sharing is active
+  updateScreenBar();
+
   document.querySelectorAll(".ch-del").forEach(btn => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1738,7 +1741,7 @@ function onRemoteScreenStart(msg: any) {
     pendingScreenMeta.set(fp, label);
     console.log("[SFU] stored pending meta for:", fp);
   }
-  renderSidebar();
+  updateScreenBar();
 }
 
 function onRemoteScreenStop(msg: any) {
@@ -1747,15 +1750,36 @@ function onRemoteScreenStop(msg: any) {
   pendingScreenMeta.delete(fp);
   if (focusedScreen === fp) focusedScreen = null;
   renderScreenGrid();
-  renderSidebar();
 }
 
 // ── Screen grid renderer ──────────────────────────────────────────────────────
 
+function updateScreenBar() {
+  // Sidebar notification bar — shows who is sharing
+  document.getElementById("screen-share-bar")?.remove();
+  if (activeScreens.size === 0 || !state.activeVoice) return;
+  const bar = document.createElement("div");
+  bar.id = "screen-share-bar";
+  bar.className = "screen-share-bar";
+  const names = [...activeScreens.values()].map(s => s.label).filter(Boolean).join(", ") || "Someone";
+  bar.innerHTML = `
+    <div class="screen-bar-row">
+      <span class="screen-bar-icon">🖥</span>
+      <span class="screen-bar-label">${escapeHtml(names)}</span>
+      <button class="screen-bar-btn" id="view-screens-btn">▶ Watch</button>
+    </div>`;
+  // Insert above voice channels section
+  const vGroup = document.querySelector(".channel-group:last-of-type");
+  vGroup?.parentElement?.insertBefore(bar, vGroup);
+  document.getElementById("view-screens-btn")?.addEventListener("click", () => {
+    if (!document.getElementById("screen-overlay")) renderScreenGrid();
+  });
+}
+
 function renderScreenGrid() {
   // Remove any existing overlay
   document.getElementById("screen-overlay")?.remove();
-  renderSidebar(); // update the sidebar bar
+  updateScreenBar(); // update sidebar bar WITHOUT calling renderSidebar
 
   if (activeScreens.size === 0) return;
 
@@ -1848,6 +1872,25 @@ function renderScreenGrid() {
   };
   document.removeEventListener("keydown", escHandler);
   document.addEventListener("keydown", escHandler);
+}
+
+// After renegotiation, scan receivers for video tracks not yet in activeScreens
+function checkForNewVideoTracks() {
+  if (!sfuPc) return;
+  for (const recv of sfuPc.getReceivers()) {
+    const track = recv.track;
+    if (!track || track.kind !== "video" || track.readyState !== "live") continue;
+    // Check if this track is already in activeScreens
+    let found = false;
+    activeScreens.forEach(({ stream }) => {
+      if (stream.getVideoTracks().some(t => t.id === track.id)) found = true;
+    });
+    if (!found) {
+      console.log("[SFU] found unregistered video track via receiver scan:", track.id);
+      const stream = new MediaStream([track]);
+      onSFUVideoTrack(stream, track);
+    }
+  }
 }
 
 function leaveVoice() {
