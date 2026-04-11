@@ -1707,7 +1707,11 @@ function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
     }
   }
   activeScreens.set(finalKey, { stream, label });
-  openScreenDrawer(); // auto-open for viewers when someone starts sharing
+  // Only auto-open if we matched a real share (not just a stale track on reconnect)
+  // A real share has either a pending meta entry matched, or track is unmuted with content
+  if (finalKey !== `__stream:${stream.id}` || !track.muted) {
+    openScreenDrawer();
+  }
   track.addEventListener("ended", () => {
     for (const [k, v] of activeScreens) {
       if (v.stream === stream) { activeScreens.delete(k); if (focusedScreen === k) focusedScreen = null; break; }
@@ -1776,8 +1780,8 @@ function updateScreenBar() {
   });
 }
 
-// Track whether the drawer is open (user explicitly closed it = stays closed until new share)
-let screenDrawerOpen = false;
+// Drawer state: false = closed, true = open, "collapsed" = tab visible but content hidden
+let screenDrawerOpen: boolean | "collapsed" = false;
 
 function openScreenDrawer() {
   screenDrawerOpen = true;
@@ -1802,28 +1806,35 @@ function renderScreenGrid() {
 
   const focused = focusedScreen && activeScreens.has(focusedScreen) ? focusedScreen : null;
 
+  const isCollapsed = screenDrawerOpen === "collapsed";
   const drawer = existing ?? document.createElement("div");
   drawer.id = "screen-drawer";
-  drawer.className = `screen-drawer ${focused ? "focused-mode" : ""}`;
+  drawer.className = `screen-drawer ${focused ? "focused-mode" : ""} ${isCollapsed ? "collapsed" : ""}`;
   drawer.innerHTML = `
-    <div class="screen-drawer-header">
-      <span class="screen-drawer-title">🖥 Screen shares (${activeScreens.size})</span>
-      <button class="screen-drawer-close" id="screen-drawer-close" title="Hide panel">✕</button>
-    </div>
-    <div class="screen-grid-inner">
-      ${[...activeScreens.entries()].map(([fp, { label }]) => `
-        <div class="screen-tile ${focused === fp ? "focused" : focused ? "hidden" : ""}"
-             data-fp="${fp}" id="tile-${fp}">
-          <div class="screen-tile-header">
-            <span class="screen-tile-label">${escapeHtml(label)}</span>
-            ${fp === state.fingerprint ? `<button class="stop-share-btn" title="Stop sharing">■ Stop</button>` : ""}
-            <button class="focus-btn" title="${focused === fp ? "Back to grid" : "Expand"}">
-              ${focused === fp ? "⊟" : "⊞"}
-            </button>
+    <button class="screen-drawer-tab" id="screen-drawer-tab" title="${isCollapsed ? "Expand" : "Collapse"}">
+      🖥 ${activeScreens.size}
+    </button>
+    <div class="screen-drawer-panel">
+      <div class="screen-drawer-header">
+        <span class="screen-drawer-title">🖥 Screen shares (${activeScreens.size})</span>
+        <button class="screen-drawer-collapse" id="screen-drawer-collapse" title="Collapse">‹</button>
+        <button class="screen-drawer-close" id="screen-drawer-close" title="Close">✕</button>
+      </div>
+      <div class="screen-grid-inner">
+        ${[...activeScreens.entries()].map(([fp, { label }]) => `
+          <div class="screen-tile ${focused === fp ? "focused" : focused ? "hidden" : ""}"
+               data-fp="${fp}" id="tile-${fp}">
+            <div class="screen-tile-header">
+              <span class="screen-tile-label">${escapeHtml(label)}</span>
+              ${fp === state.fingerprint ? `<button class="stop-share-btn" title="Stop sharing">■ Stop</button>` : ""}
+              <button class="focus-btn" title="${focused === fp ? "Back to grid" : "Expand"}">
+                ${focused === fp ? "⊟" : "⊞"}
+              </button>
+            </div>
+            <video class="screen-video" id="vid-${fp}" autoplay playsinline muted></video>
           </div>
-          <video class="screen-video" id="vid-${fp}" autoplay playsinline muted></video>
-        </div>
-      `).join("")}
+        `).join("")}
+      </div>
     </div>`;
 
   if (!existing) document.body.appendChild(drawer);
@@ -1834,7 +1845,19 @@ function renderScreenGrid() {
     if (vid && vid.srcObject !== stream) vid.srcObject = stream;
   });
 
-  // Close = hide drawer, mark closed so it doesn't reopen automatically
+  // Tab toggle — expands collapsed drawer
+  document.getElementById("screen-drawer-tab")?.addEventListener("click", () => {
+    screenDrawerOpen = screenDrawerOpen === "collapsed" ? true : "collapsed";
+    renderScreenGrid();
+  });
+
+  // Collapse — hides panel, shows tab
+  document.getElementById("screen-drawer-collapse")?.addEventListener("click", () => {
+    screenDrawerOpen = "collapsed";
+    renderScreenGrid();
+  });
+
+  // Close = fully remove drawer
   document.getElementById("screen-drawer-close")?.addEventListener("click", () => {
     drawer.remove();
     screenDrawerOpen = false;
@@ -1871,21 +1894,22 @@ function renderScreenGrid() {
   document.addEventListener("keydown", escHandler);
 }
 
-// After renegotiation, scan receivers for video tracks not yet in activeScreens
-// Only processes tracks that are unmuted (have real content from a sender)
+// After renegotiation, scan for video tracks not yet shown.
+// Only runs if we know someone is sharing (pendingScreenMeta has entries or activeScreens has __stream: keys)
 function checkForNewVideoTracks() {
   if (!sfuPc) return;
+  const hasPending = pendingScreenMeta.size > 0;
+  const hasUnkeyed = [...activeScreens.keys()].some(k => k.startsWith("__stream:"));
+  if (!hasPending && !hasUnkeyed) return; // no one is known to be sharing
   for (const recv of sfuPc.getReceivers()) {
     const track = recv.track;
     if (!track || track.kind !== "video" || track.readyState !== "live") continue;
-    // Skip muted tracks — these are placeholder transceivers with no real content
-    if (track.muted) continue;
     let found = false;
     activeScreens.forEach(({ stream }) => {
       if (stream.getVideoTracks().some(t => t.id === track.id)) found = true;
     });
     if (!found) {
-      console.log("[SFU] found unregistered video track:", track.id, "muted:", track.muted);
+      console.log("[SFU] receiver scan found video track:", track.id, "muted:", track.muted);
       const stream = new MediaStream([track]);
       onSFUVideoTrack(stream, track);
     }

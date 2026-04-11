@@ -1,6 +1,6 @@
-## [0.1.22] - 2026-04-11
+## [0.1.23] - 2026-04-11
 
-Screen share drawer: right panel, never auto-shows, opens only when sharing starts
+Screen drawer collapsible tab, fix peer lingering on disconnect, smarter video track detection
 
 # Changelog
 

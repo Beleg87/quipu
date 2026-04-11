@@ -506,37 +506,66 @@ input  { font: inherit; }
 .screen-bar-btn:hover { opacity: 0.85; }
 
 
-/* ── Screen share drawer (right side panel) ── */
+
+/* ── Screen share drawer ── */
 .screen-drawer {
   position: fixed;
   top: 0; right: 0; bottom: 0;
-  width: 420px;
-  background: #0d0d0d;
-  border-left: 1px solid var(--border);
-  display: flex; flex-direction: column;
+  width: 400px;
+  display: flex; flex-direction: row;
   z-index: 400;
-  box-shadow: -4px 0 24px rgba(0,0,0,0.5);
-  transition: width 0.2s ease;
+  pointer-events: none; /* let clicks through by default */
 }
 .screen-drawer.focused-mode { width: 600px; }
 
+/* Collapsed: only the tab strip is visible */
+.screen-drawer.collapsed { width: 32px; }
+.screen-drawer.collapsed .screen-drawer-panel { display: none; }
+
+/* The clickable tab on the left edge of the drawer */
+.screen-drawer-tab {
+  width: 32px; flex-shrink: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: 6px 0 0 6px;
+  color: var(--muted); font-size: 0.68rem;
+  cursor: pointer; pointer-events: all;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  padding: 0.5rem 0.2rem;
+  display: flex; align-items: center; justify-content: center;
+  gap: 0.25rem;
+  transition: background 0.15s;
+}
+.screen-drawer-tab:hover { background: var(--hover); color: var(--text); }
+
+/* The main panel */
+.screen-drawer-panel {
+  flex: 1; display: flex; flex-direction: column;
+  background: #0d0d0d;
+  border-left: 1px solid var(--border);
+  pointer-events: all;
+  box-shadow: -4px 0 24px rgba(0,0,0,0.5);
+}
+
 .screen-drawer-header {
-  display: flex; align-items: center;
-  padding: 0.5rem 0.75rem;
+  display: flex; align-items: center; gap: 0.3rem;
+  padding: 0.4rem 0.6rem;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.screen-drawer-title { flex: 1; font-size: 0.8rem; color: var(--muted); }
-.screen-drawer-close {
+.screen-drawer-title { flex: 1; font-size: 0.78rem; color: var(--muted); }
+.screen-drawer-collapse, .screen-drawer-close {
   background: none; border: none; color: var(--muted);
-  cursor: pointer; font-size: 1rem; padding: 0 0.25rem; line-height: 1;
+  cursor: pointer; font-size: 1rem; padding: 0 0.2rem; line-height: 1;
 }
-.screen-drawer-close:hover { color: var(--text); }
+.screen-drawer-collapse:hover, .screen-drawer-close:hover { color: var(--text); }
 
 .screen-grid-inner {
   display: flex; flex-direction: column;
-  gap: 2px; padding: 4px;
+  gap: 3px; padding: 4px;
   flex: 1; overflow-y: auto;
 }
 .screen-drawer.focused-mode .screen-tile.hidden { display: none; }
@@ -546,20 +575,20 @@ input  { font: inherit; }
   position: relative; background: #111;
   border-radius: 4px; overflow: hidden;
   display: flex; flex-direction: column;
-  min-height: 200px; flex-shrink: 0;
+  min-height: 180px; flex-shrink: 0;
 }
 .screen-tile-header {
   display: flex; align-items: center; gap: 0.3rem;
-  padding: 0.25rem 0.5rem;
-  background: rgba(0,0,0,0.7);
+  padding: 0.2rem 0.4rem;
+  background: rgba(0,0,0,0.75);
   position: absolute; top: 0; left: 0; right: 0;
   z-index: 2; opacity: 0; transition: opacity 0.15s;
 }
 .screen-tile:hover .screen-tile-header { opacity: 1; }
-.screen-tile-label { flex: 1; color: #eee; font-size: 0.72rem; }
+.screen-tile-label { flex: 1; color: #eee; font-size: 0.7rem; }
 .focus-btn, .stop-share-btn {
   background: rgba(255,255,255,0.15); border: none;
-  color: #eee; font-size: 0.68rem; padding: 0.12rem 0.3rem;
+  color: #eee; font-size: 0.65rem; padding: 0.1rem 0.3rem;
   border-radius: 3px; cursor: pointer; font-family: inherit;
 }
 .focus-btn:hover { background: rgba(255,255,255,0.3); }
@@ -567,6 +596,5 @@ input  { font: inherit; }
 .stop-share-btn:hover { background: rgba(220,50,50,0.9); }
 .screen-video {
   width: 100%; flex: 1; display: block;
-  object-fit: contain; background: #000;
-  min-height: 180px;
+  object-fit: contain; background: #000; min-height: 160px;
 }
