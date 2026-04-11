@@ -701,35 +701,55 @@ function scrollBottom() {
 
 // ── Settings view ─────────────────────────────────────────────────────────────
 
+// Saved device selections — persist across settings re-opens
+let savedMicId: string = localStorage.getItem("quipu_mic_id") || "";
+let savedSpeakerId: string = localStorage.getItem("quipu_speaker_id") || "";
+
 async function populateAudioDevices() {
+  const micSel     = document.getElementById("mic-select")     as HTMLSelectElement | null;
+  const speakerSel = document.getElementById("speaker-select") as HTMLSelectElement | null;
+  if (!micSel && !speakerSel) return;
+
   try {
-    // Request permission so labels are available
-    await navigator.mediaDevices.getUserMedia({ audio: true }).then(s => s.getTracks().forEach(t => t.stop())).catch(() => {});
+    // Without getUserMedia permission, device labels are empty strings
+    // Try a quick silent request to unlock labels — ignore failure (user may deny)
+    const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
+    tempStream?.getTracks().forEach(t => t.stop());
+
     const devices = await navigator.mediaDevices.enumerateDevices();
-    const micSel     = document.getElementById("mic-select")     as HTMLSelectElement | null;
-    const speakerSel = document.getElementById("speaker-select") as HTMLSelectElement | null;
     const inputs  = devices.filter(d => d.kind === "audioinput");
     const outputs = devices.filter(d => d.kind === "audiooutput");
+
     if (micSel) {
-      micSel.innerHTML = `<option value="">Default</option>`;
+      const prev = micSel.value || savedMicId;
+      micSel.innerHTML = `<option value="">Default microphone</option>`;
       inputs.forEach(d => {
         const opt = document.createElement("option");
         opt.value = d.deviceId;
         opt.text  = d.label || `Microphone ${d.deviceId.slice(0, 8)}`;
+        if (d.deviceId === prev) opt.selected = true;
         micSel.appendChild(opt);
       });
+      micSel.addEventListener("change", () => {
+        savedMicId = micSel.value;
+        localStorage.setItem("quipu_mic_id", savedMicId);
+      });
     }
+
     if (speakerSel) {
-      speakerSel.innerHTML = `<option value="">Default</option>`;
+      const prev = speakerSel.value || savedSpeakerId;
+      speakerSel.innerHTML = `<option value="">Default speaker</option>`;
       outputs.forEach(d => {
         const opt = document.createElement("option");
         opt.value = d.deviceId;
         opt.text  = d.label || `Speaker ${d.deviceId.slice(0, 8)}`;
-        if (d.deviceId === outputDeviceId) opt.selected = true;
+        if (d.deviceId === prev) opt.selected = true;
         speakerSel.appendChild(opt);
       });
       speakerSel.addEventListener("change", () => {
-        outputDeviceId = speakerSel.value;
+        savedSpeakerId = speakerSel.value;
+        outputDeviceId = savedSpeakerId;
+        localStorage.setItem("quipu_speaker_id", savedSpeakerId);
         applyOutputDevice();
       });
     }
@@ -1284,6 +1304,13 @@ function onChatMessage(msg: any) {
     channelPeers.forEach(set => set.delete(msg.from));
     if (!channelPeers.has(ch)) channelPeers.set(ch, new Set());
     channelPeers.get(ch)!.add(msg.from);
+    // If they joined our active voice channel, add to voicePeers so they appear in sidebar
+    if (ch === state.activeVoice) {
+      voicePeers.add(msg.from);
+      // In SFU mode we don't need to create a P2P connection — SFU handles audio
+      // In P2P mode, the offer/answer exchange will happen via createOrGetPC
+      if (voiceMode === "p2p") createOrGetPC(msg.from, false);
+    }
     renderSidebar();
     return;
   }
@@ -1291,8 +1318,8 @@ function onChatMessage(msg: any) {
   if (msg.payload?.text?.startsWith("__voice-leave:")) {
     const ch = msg.payload.text.replace("__voice-leave:", "");
     voicePeers.delete(msg.from);
-    const cpSet = channelPeers.get(ch);
-    if (cpSet) cpSet.delete(msg.from);
+    // Remove from all channel sets (not just the one named in the message)
+    channelPeers.forEach(set => set.delete(msg.from));
     // Close their P2P connection if in P2P mode
     const peer = state.peers.get(msg.from);
     if (peer?.pc) { peer.pc.close(); state.peers.set(msg.from, { ...peer, pc: null as any }); }
@@ -1377,7 +1404,8 @@ async function toggleVoiceChannel(ch: string) {
       echoCancellation:   true,
       autoGainControl:    true,
     };
-    if (micSel?.value) audioConstraints.deviceId = { exact: micSel.value };
+    const micId = micSel?.value || savedMicId;
+    if (micId) audioConstraints.deviceId = { ideal: micId }; // ideal not exact — falls back gracefully
     localStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
   } catch (e) { alert(`Microphone access denied: ${e}`); return; }
 
@@ -1631,33 +1659,46 @@ function updateShareButton(sharing: boolean) {
   btn.title = sharing ? "Stop sharing" : "Share screen";
 }
 
+// Pending screen-start metadata (broadcast may arrive before or after track)
+const pendingScreenMeta: Map<string, string> = new Map(); // fp → label
+
 // Called when we receive a video track from the SFU (someone else sharing)
 function onSFUVideoTrack(stream: MediaStream, track: MediaStreamTrack) {
-  // We don't know the owner fp yet — we'll get it from sfu-screen-start broadcast
-  // Store by stream ID temporarily, will be updated when broadcast arrives
-  const tempKey = `__stream:${stream.id}`;
-  activeScreens.set(tempKey, { stream, label: "..." });
+  // Try to match against any pending sfu-screen-start metadata by checking all pending fps
+  // The track stream ID isn't tied to the fp, so we use arrival order as a heuristic
+  // The sfu-screen-start broadcast updates the label once it arrives
+  const streamKey = `__stream:${stream.id}`;
+  // Check if we have pending metadata that arrived before the track
+  let matched = "";
+  for (const [fp] of pendingScreenMeta) {
+    if (!activeScreens.has(fp)) { matched = fp; break; }
+  }
+  const key   = matched || streamKey;
+  const label = matched ? (pendingScreenMeta.get(matched) || displayName(matched)) : "Sharing...";
+  if (matched) pendingScreenMeta.delete(matched);
+
+  activeScreens.set(key, { stream, label });
   renderScreenGrid();
+
   track.addEventListener("ended", () => {
-    activeScreens.delete(tempKey);
+    activeScreens.delete(key);
+    if (focusedScreen === key) focusedScreen = null;
     renderScreenGrid();
   });
 }
 
 function onRemoteScreenStart(msg: any) {
-  const fp   = msg.from ?? msg.payload?.from;
+  const fp    = msg.from ?? msg.payload?.from;
   const label = msg.payload?.label ?? displayName(fp);
-  // Find the temp entry and re-key it to the fp
-  for (const [key, val] of activeScreens) {
-    if (key.startsWith("__stream:")) {
-      activeScreens.delete(key);
-      activeScreens.set(fp, { ...val, label });
-      break;
-    }
-  }
-  // If not found yet (broadcast arrived before track), pre-register
-  if (!activeScreens.has(fp)) {
-    // Will be populated when onSFUVideoTrack fires
+  // Find existing temp entry and re-key it
+  const streamKey = [...activeScreens.keys()].find(k => k.startsWith("__stream:"));
+  if (streamKey) {
+    const val = activeScreens.get(streamKey)!;
+    activeScreens.delete(streamKey);
+    activeScreens.set(fp, { ...val, label });
+  } else {
+    // Track not arrived yet — store metadata for when it does
+    pendingScreenMeta.set(fp, label);
   }
   renderScreenGrid();
 }
@@ -1665,6 +1706,7 @@ function onRemoteScreenStart(msg: any) {
 function onRemoteScreenStop(msg: any) {
   const fp = msg.from ?? msg.payload?.from;
   activeScreens.delete(fp);
+  pendingScreenMeta.delete(fp);
   if (focusedScreen === fp) focusedScreen = null;
   renderScreenGrid();
 }
@@ -1837,8 +1879,9 @@ async function onRtcOffer(msg: any) {
     if (!audio) { audio = document.createElement("audio"); audio.id = `audio-${msg.from}`; audio.autoplay = true; container.appendChild(audio); }
     audio.srcObject = ev.streams[0];
     setPeerVolume(msg.from, getPeerVolume(msg.from));
-    if (outputDeviceId && typeof (audio as any).setSinkId === "function") {
-      (audio as any).setSinkId(outputDeviceId).catch(console.warn);
+    const sinkId = outputDeviceId || savedSpeakerId;
+    if (sinkId && typeof (audio as any).setSinkId === "function") {
+      (audio as any).setSinkId(sinkId).catch(console.warn);
     }
   };
   pc.onicecandidate = (ev) => {

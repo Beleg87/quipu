@@ -1,6 +1,6 @@
-## [0.1.12] - 2026-04-11
+## [0.1.13] - 2026-04-11
 
-Screen share, fix voice peer visibility (ghost peers, missing peers for late joiners)
+Fix voice peer list visibility, screen share grid, audio device persistence
 
 # Changelog
 
